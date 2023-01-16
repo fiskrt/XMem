@@ -6,6 +6,16 @@ from collections import defaultdict
 
 
 def dice_loss(input_mask, cls_gt):
+    """
+        input_mask: 4x3x384x384 (B x num_obj x H x W)
+        cls_gt:     4x384x384
+
+        dice_loss is calculated per class, each loss is also
+        over batch dimension. 
+        Finally, the losses for each class is averaged.
+    """
+    #return projected_loss(input_mask, cls_gt)
+
     num_objects = input_mask.shape[1]
     losses = []
     for i in range(num_objects):
@@ -18,6 +28,49 @@ def dice_loss(input_mask, cls_gt):
         losses.append(loss)
     return torch.cat(losses).mean()
 
+def projected_loss(input_mask, cls_gt):
+    num_objects = input_mask.shape[1]
+    losses = []
+    for i in range(num_objects):
+        mask = input_mask[:,i] # is now BxHxW
+        # background not in mask, so we add one to cls_gt
+        # extract gt for object 'i'
+        gt = (cls_gt==(i+1)).float() # BxHxW
+        #gt = cls_gt
+
+        loss_y= dice_coefficient(
+            mask.max(dim=1)[0],
+            gt.max(dim=1)[0]
+        )
+
+        loss_x= dice_coefficient(
+            mask.max(dim=2)[0],
+            gt.max(dim=2)[0]
+        )
+        losses.append(0.5*(loss_x+loss_y))
+    return torch.cat(losses).mean()
+
+def dice_coefficient(mask, gt):
+    eps = 1
+    numerator = 2 * (mask * gt).sum(-1)
+    denominator = mask.sum(-1) + gt.sum(-1)
+    loss = 1 - (numerator + eps) / (denominator + eps)
+    return loss
+
+def test_loss():
+    m = torch.ones((4,1,5,5))
+    gt = m[:,0] == 1
+    m[1,0,3,4] = 1
+    m[1,0,:,1] = 1
+    m[:,0,2,:] = 1
+    
+
+    #gt[3,3,:] =0
+
+    l = projected_loss(m, gt)
+    print(l)
+
+#test_loss()
 
 # https://stackoverflow.com/questions/63735255/how-do-i-compute-bootstrapped-cross-entropy-loss-in-pytorch
 class BootstrappedCE(nn.Module):
@@ -50,8 +103,15 @@ class LossComputer:
         self.bce = BootstrappedCE(config['start_warm'], config['end_warm'])
 
     def compute(self, data, num_objects, it):
+        """
+            it = the # time this function is called
+            num_objects[i] = # objects in frame[i]. i=0...Batch_size-1
+
+            data['rgb'] = (B, 8, 3, H, W) what is 8?
+        """
         losses = defaultdict(int)
 
+        # get batch b, and num_frames t
         b, t = data['rgb'].shape[:2]
 
         losses['total_loss'] = 0
