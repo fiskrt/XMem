@@ -67,7 +67,7 @@ class Configuration():
         parser.add_argument('--s2_end_warm', default=70000, type=int)
 
         # Stage 3, DAVIS+YoutubeVOS, shorter
-        parser.add_argument('--s3_batch_size', default=8, type=int)
+        parser.add_argument('--s3_batch_size', default=4, type=int)
         parser.add_argument('--s3_iterations', default=100000, type=int)
         # fine-tune means fewer augmentations to train the sensory memory
         parser.add_argument('--s3_finetune', default=10000, type=int)
