@@ -6,6 +6,16 @@ output/
 workspace/
 run*.sh
 
+#my
+vis_mask_check/
+results/
+
+# videos
+*.avi
+# slurm outputs
+*.out
+*.error
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

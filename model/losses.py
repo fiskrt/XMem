@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from torchvision.ops import masks_to_boxes
+
 from collections import defaultdict
 
 from skimage import color
@@ -183,8 +185,11 @@ class LossComputer:
             data['logits_i'] =  B * n_obj+1 * H * W (+1 because we treat bg as object)
 
             data['cls_gt'] B x 8 x 1 x H x W
+            data['info]['num_objects'] = tensor of len B (Just the num objects per batch)
 
             masks [0,1] are the sigmoid of logits (-inf, inf)
+
+
         """
         losses = defaultdict(int)
 
@@ -201,25 +206,55 @@ class LossComputer:
            # losses['total_loss'] += losses['ce_loss_%d'%ti]
             images_rgb = data['rgb'][:,ti] # B x 3 x H x W
             logits = data[f'logits_{ti}']
-            
-            num_objects = logits.shape[1]
-            target_masks = data['cls_gt'][:, ti, 0] # B x H x W
-
-            # B*n_obj x 1 x H x W
-            target_masks = torch.stack([m==i for i in range(num_objects) for m in target_masks])[:, None]
             # B x n_obj x H x W --> B*n_obj x 1 x H x W
             source_logits = logits.flatten(0,1)[:, None]
+            num_objects = logits.shape[1]
+            target_masks = data['cls_gt'][:, ti, 0] # B x H x W
 
             # list of len B with (1 * C * H * W)
             images_lab = [torch.as_tensor(color.rgb2lab(rgb_img.byte().permute(1, 2, 0).cpu().numpy()),
                                          device=rgb_img.device, dtype=torch.float32).permute(2, 0, 1)[None]
                             for rgb_img in images_rgb]
 
-            # list of len B: (1 x K^2-1 x H x W)
+            # (B x K^2-1 x H x W)
             images_lab_similarity = torch.cat([get_images_color_similarity(img_lab) for img_lab in images_lab])
             images_lab_similarity = images_lab_similarity.repeat(num_objects, 1, 1, 1)
             # want images_lab_sim to be (B*num_obj x H x W)
             # cat them together
+
+            # note that we count bg as a objected now
+            # B*n_obj x 1 x H x W
+            #target_masks = torch.stack([m==i for m in target_masks for i in range(num_objects)])[:, None]
+            masks = []
+            bboxes = []
+            images_lab_sim_all = []
+            for bn, m in enumerate(target_masks):
+                #for i in range(data['info']['num_objects'][bn]):
+                for i in range(num_objects):
+                    # create both img_lab_sim and target_bboxes here
+                    # we can skip objects that does not exist in a batch
+                    mask = (m==i).float()
+                    bbox = torch.zeros_like(mask)
+
+                    if mask.any():
+                        x1,y1,x2,y2 = masks_to_boxes(mask[None]).long()[0]
+                        bbox[y1:y2+1, x1:x2+1] = 1.
+                    else:
+                        bbox = mask
+                    masks.append(mask)
+                    bboxes.append(bbox)
+                    #images_lab_sim_all.append(images_lab_similarity[bn])
+
+            # TODO: insert dim 1?
+            target_masks = torch.stack(masks)[:,None]
+          #  images_lab_similarity = torch.cat(images_lab_sim_all)
+            target_bboxes = torch.stack(bboxes)[:,None]
+            
+            # TODO: crashes when no object exist, 
+            # Convert masks to bboxes
+            #target_bboxes = torch.zeros_like(target_masks)
+            #for i, (x1,y1,x2,y2) in enumerate(masks_to_boxes(target_masks[:,0]).long()):
+            #    target_bboxes[i, 0, y1:y2+1, x1:x2+1] = 1.
 
             # B*n_obj x K^2-1 x H x W
             pairwise_loss = compute_pairwise_term(source_logits)
@@ -227,35 +262,50 @@ class LossComputer:
 
             # Use the lab_similarity to mask pixels that are similar
             # target_masks is the gt mask
-            weights = (images_lab_similarity >= 0.3).float() * target_masks.float()
+            weights = (images_lab_similarity >= 0.3).float() * target_bboxes.float()
             loss_pairwise = (pairwise_loss * weights).sum() / weights.sum().clamp(min=1.0)
             
-            loss_projection = compute_project_term(source_logits.sigmoid(), target_masks)
-
+            loss_projection = compute_project_term(source_logits.sigmoid(), target_bboxes)
 
             losses[f'proj_loss_{ti}'] = loss_projection 
             losses[f'pair_loss_{ti}'] = loss_pairwise
             losses['total_loss'] += losses[f'pair_loss_{ti}'] + losses[f'proj_loss_{ti}']
 
+            cv2.imwrite(f'vis_mask_check/mask.png',target_masks[5].repeat(3,1,1).permute(1,2,0).float().cpu().numpy() * 255)
+            for i, w in enumerate(weights[5]):
+                w = w.repeat(3,1,1)
+                cv2.imwrite(f'vis_mask_check/{i}_image.png',w.permute(1,2,0).float().cpu().numpy() * 255)
 
-   #         for i, img in enumerate(images_lab):
-#  #              img2 = cv2.cvtColor(img.permute(1,2,0).float().cpu().numpy() * 255, cv2.COLOR_RGB2BGR)
-   #             img = img.squeeze(0)
-   #             mask = data['cls_gt'][i, ti,0][None]
-   #             print(img.shape)
-   #             print(mask.shape)
-   #             print(mask.max())
-   #             cv2.imwrite(f'vis_mask_check/{i}_image.png',img.permute(1,2,0).float().cpu().numpy() * 255)
-   #             cv2.imwrite(f'vis_mask_check/{i}_mask.png',mask.permute(1,2,0).float().cpu().numpy() * 255)
-   #         
-            #exit(1)
+#            write_imgs(images_lab, data, ti, images_lab_similarity, weights)
 
+            #del images_lab_similarity
+            #del images_lab
+            #del source_logits
+            del target_masks
 
             #losses[f'dice_loss_{ti}'] = dice_loss(data[f'masks_{ti}'], data['cls_gt'][:,ti,0])
             #losses['total_loss'] += losses[f'dice_loss_{ti}']
 
         return losses
 
+
+def write_imgs(images, data, ti, images_sim, weights):
+    for i, img in enumerate(images):
+#                img2 = cv2.cvtColor(img.permute(1,2,0).float().cpu().numpy() * 255, cv2.COLOR_RGB2BGR)
+        img = img.squeeze(0)
+        mask = data['cls_gt'][i, ti,0][None].repeat(3,1,1)
+        sim = images_sim[4*i].repeat(3,1,1)
+        w = weights[4*i].repeat(3,1,1)
+        img_right = torch.cat([sim, w], dim=1)
+        img_left = torch.cat([img, mask], dim=1)
+
+        img = torch.cat([img_left, img_right], dim=2)
+
+        print(f'concat img shape: {img.shape}')
+        cv2.imwrite(f'vis_mask_check/{i}_image.png',img.permute(1,2,0).float().cpu().numpy() * 255)
+#        cv2.imwrite(f'vis_mask_check/{i}_mask.png',mask.permute(1,2,0).float().cpu().numpy() * 255)
+    
+    exit(1)
 
 
 def unfold_wo_center(x, kernel_size, dilation):
