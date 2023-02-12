@@ -33,21 +33,6 @@ def dice_loss(input_mask, cls_gt):
     return torch.cat(losses).mean()
 
 
-def pairwise_loss(input_mask, cls_gt):
-    """
-        Only have to do this for edges e which have atleast one pixel within
-        the bounding box.
-
-        TODO: Mask predicted mask so we only sum over edges within bounding box?
-        TODO: actual rgb images should be used: first convert to LAB, then do image similarity on every img
-
-        Assume we are doing single object detection. Then just sum the losses over the objects.
-    """
-
-    # color thresh 0.3 by default in implementation
-    pass
-
-
 def compute_pairwise_term(mask_logits, pairwise_size=3, pairwise_dilation=2):
     """
         Calc probabilities Pr(y_e=1)=Pr(pixels are the same)
@@ -75,6 +60,9 @@ def compute_pairwise_term(mask_logits, pairwise_size=3, pairwise_dilation=2):
     log_same_bg_prob = log_bg_prob[:, :, None] + log_bg_prob_unfold
 
     # TODO: why max?
+    # factor out the e^max so we dont get overflow. Smart!
+    # when we take it out= log(e^max)+log(e^x1+e^x2)
+    # This is implemented in torch.logsumexp()
     max_ = torch.max(log_same_fg_prob, log_same_bg_prob)
     log_same_prob = torch.log(
         torch.exp(log_same_fg_prob - max_) +
@@ -84,39 +72,34 @@ def compute_pairwise_term(mask_logits, pairwise_size=3, pairwise_dilation=2):
     # loss = -log(prob)
     return -log_same_prob[:, 0]
 
-def projected_loss(input_mask, cls_gt):
-    num_objects = input_mask.shape[1]
-    losses = []
-    for i in range(num_objects):
-        mask = input_mask[:,i] # is now BxHxW
-        # background not in mask, so we add one to cls_gt
-        # extract gt for object 'i'
-        gt = (cls_gt==(i+1)).float() # BxHxW
+# old dice
+#def dice_coefficient(mask, gt):
+#    eps = 0.0001
+#    numerator = 2 * (mask * gt).sum(-1)
+#    denominator = mask.sum(-1) + gt.sum(-1)
+#    loss = 1 - (numerator + eps) / (denominator + eps)
+#    return loss
 
-        loss_y= dice_coefficient(
-            mask.max(dim=1)[0],
-            gt.max(dim=1)[0]
-        )
-
-        loss_x= dice_coefficient(
-            mask.max(dim=2)[0],
-            gt.max(dim=2)[0]
-        )
-        losses.append(0.5*(loss_x+loss_y))
-    return torch.cat(losses).mean()
-
-def dice_coefficient(mask, gt):
-    eps = 1
-    numerator = 2 * (mask * gt).sum(-1)
-    denominator = mask.sum(-1) + gt.sum(-1)
-    loss = 1 - (numerator + eps) / (denominator + eps)
+def dice_coefficient(x, target):
+    eps = 1e-5
+    n_inst = x.size(0)
+    x = x.reshape(n_inst, -1)
+    target = target.reshape(n_inst, -1)
+    intersection = (x * target).sum(dim=1)
+    union = (x ** 2.0).sum(dim=1) + (target ** 2.0).sum(dim=1) + eps
+    loss = 1. - (2 * intersection / union)
     return loss
 
 def bs():
-    t1 = 0.*torch.ones((4,300))
-    t2 = 0.*torch.ones((4,300))
-    res = dice_coefficient(t1,t2)
-    print(res)
+    #B*4 x 1 x H x W 
+    t1 = 0.1*torch.ones((12, 1, 300,300))
+    t2 = 0.12*torch.ones((12, 1, 300,300))
+    #res = dice_coefficient(t1,t2)
+    #print(res)
+
+    res2= dice_coefficient2(t1,t2)
+    print(res2)
+    print('wt')
 #bs()
 
 def test_loss():
@@ -143,7 +126,6 @@ def compute_project_term(mask_scores, gt_bitmasks):
     )
     return (mask_losses_x + mask_losses_y).mean()
 
-#test_loss()
 
 # https://stackoverflow.com/questions/63735255/how-do-i-compute-bootstrapped-cross-entropy-loss-in-pytorch
 class BootstrappedCE(nn.Module):
@@ -187,9 +169,7 @@ class LossComputer:
             data['cls_gt'] B x 8 x 1 x H x W
             data['info]['num_objects'] = tensor of len B (Just the num objects per batch)
 
-            masks [0,1] are the sigmoid of logits (-inf, inf)
-
-
+            masks [0,1] are the sigmoid of logits (-inf, inf) with bg object removed
         """
         losses = defaultdict(int)
 
@@ -218,21 +198,16 @@ class LossComputer:
 
             # (B x K^2-1 x H x W)
             images_lab_similarity = torch.cat([get_images_color_similarity(img_lab) for img_lab in images_lab])
-            images_lab_similarity = images_lab_similarity.repeat(num_objects, 1, 1, 1)
             # want images_lab_sim to be (B*num_obj x H x W)
-            # cat them together
+            images_lab_similarity = images_lab_similarity.repeat(num_objects, 1, 1, 1)
 
             # note that we count bg as a objected now
             # B*n_obj x 1 x H x W
             #target_masks = torch.stack([m==i for m in target_masks for i in range(num_objects)])[:, None]
             masks = []
             bboxes = []
-            images_lab_sim_all = []
             for bn, m in enumerate(target_masks):
-                #for i in range(data['info']['num_objects'][bn]):
                 for i in range(num_objects):
-                    # create both img_lab_sim and target_bboxes here
-                    # we can skip objects that does not exist in a batch
                     mask = (m==i).float()
                     bbox = torch.zeros_like(mask)
 
@@ -243,45 +218,34 @@ class LossComputer:
                         bbox = mask
                     masks.append(mask)
                     bboxes.append(bbox)
-                    #images_lab_sim_all.append(images_lab_similarity[bn])
 
-            # TODO: insert dim 1?
             target_masks = torch.stack(masks)[:,None]
-          #  images_lab_similarity = torch.cat(images_lab_sim_all)
             target_bboxes = torch.stack(bboxes)[:,None]
             
-            # TODO: crashes when no object exist, 
-            # Convert masks to bboxes
-            #target_bboxes = torch.zeros_like(target_masks)
-            #for i, (x1,y1,x2,y2) in enumerate(masks_to_boxes(target_masks[:,0]).long()):
-            #    target_bboxes[i, 0, y1:y2+1, x1:x2+1] = 1.
-
             # B*n_obj x K^2-1 x H x W
             pairwise_loss = compute_pairwise_term(source_logits)
-
 
             # Use the lab_similarity to mask pixels that are similar
             # target_masks is the gt mask
             weights = (images_lab_similarity >= 0.3).float() * target_bboxes.float()
             loss_pairwise = (pairwise_loss * weights).sum() / weights.sum().clamp(min=1.0)
-            
             loss_projection = compute_project_term(source_logits.sigmoid(), target_bboxes)
 
             losses[f'proj_loss_{ti}'] = loss_projection 
             losses[f'pair_loss_{ti}'] = loss_pairwise
             losses['total_loss'] += losses[f'pair_loss_{ti}'] + losses[f'proj_loss_{ti}']
 
-            cv2.imwrite(f'vis_mask_check/mask.png',target_masks[5].repeat(3,1,1).permute(1,2,0).float().cpu().numpy() * 255)
-            for i, w in enumerate(weights[5]):
-                w = w.repeat(3,1,1)
-                cv2.imwrite(f'vis_mask_check/{i}_image.png',w.permute(1,2,0).float().cpu().numpy() * 255)
+         #   cv2.imwrite(f'vis_mask_check/mask.png',target_masks[5].repeat(3,1,1).permute(1,2,0).float().cpu().numpy() * 255)
+         #   for i, w in enumerate(weights[5]):
+         #       w = w.repeat(3,1,1)
+         #       cv2.imwrite(f'vis_mask_check/{i}_image.png',w.permute(1,2,0).float().cpu().numpy() * 255)
 
 #            write_imgs(images_lab, data, ti, images_lab_similarity, weights)
 
             #del images_lab_similarity
             #del images_lab
             #del source_logits
-            del target_masks
+            #del target_masks
 
             #losses[f'dice_loss_{ti}'] = dice_loss(data[f'masks_{ti}'], data['cls_gt'][:,ti,0])
             #losses['total_loss'] += losses[f'dice_loss_{ti}']
