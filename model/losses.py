@@ -61,7 +61,6 @@ def compute_pairwise_term(mask_logits, pairwise_size=3, pairwise_dilation=2):
     log_same_fg_prob = log_fg_prob[:, :, None] + log_fg_prob_unfold
     log_same_bg_prob = log_bg_prob[:, :, None] + log_bg_prob_unfold
 
-    # TODO: why max?
     # factor out the e^max so we dont get overflow. Smart!
     # when we take it out= log(e^max)+log(e^x1+e^x2)
     # This is implemented in torch.logsumexp()
@@ -74,20 +73,12 @@ def compute_pairwise_term(mask_logits, pairwise_size=3, pairwise_dilation=2):
     # loss = -log(prob)
     return -log_same_prob[:, 0]
 
-# old dice
-#def dice_coefficient(mask, gt):
-#    eps = 0.0001
-#    numerator = 2 * (mask * gt).sum(-1)
-#    denominator = mask.sum(-1) + gt.sum(-1)
-#    loss = 1 - (numerator + eps) / (denominator + eps)
-#    return loss
-
 def dice_coefficient(x, target):
     assert (x<=1.).all() and (x>=0.).all(), 'probability not in [0,1]'
     assert (target<=1.).all() and (target>=0.).all(), 'probability not in [0,1]'
-    #assert ((target == 1.) | (target == 0.)).all(), 'mask not 0,1'
+    assert ((target == 1.) | (target == 0.)).all(), 'mask not 0,1'
 
-    eps = 1e-8
+    eps = 1e-5
     n_inst = x.size(0)
     x = x.reshape(n_inst, -1)
     target = target.reshape(n_inst, -1)
@@ -96,21 +87,9 @@ def dice_coefficient(x, target):
     loss = 1. - (2 * intersection / union)
     return loss
 
-
-def test_loss():
-    m = torch.ones((4,1,5,5))
-    gt = m[:,0] == 1
-    m[1,0,3,4] = 1
-    m[1,0,:,1] = 1
-    m[:,0,2,:] = 1
-    
-
-    #gt[3,3,:] =0
-
-    l = projected_loss(m, gt)
-    print(l)
-
 def compute_project_term(mask_scores, gt_bitmasks):
+    # mask_scores [0,1] , gt_bitmasks = {0,1}
+    # B*n_obj x 1 x H x W
     mask_losses_y = dice_coefficient(
         mask_scores.max(dim=2, keepdim=True)[0],
         gt_bitmasks.max(dim=2, keepdim=True)[0]
@@ -121,18 +100,6 @@ def compute_project_term(mask_scores, gt_bitmasks):
     )
     return (mask_losses_x + mask_losses_y).mean()
 
-def bs():
-    #B*4 x 1 x H x W 
-    t1 = (torch.randn((12, 1, 300,300)) > 0.5).float()
-    t2 = (torch.randn((12, 1, 300,300)) > 0.5).float()
-    #res = dice_coefficient(t1,t2)
-    #print(res)
-   # res2= dice_coefficient(t1,(~t1.bool()).float())
-    print(compute_project_term(torch.zeros_like(t1),(~t1.bool()).float()))
-   # print(res2)
-    print('wtf')
-
-#bs()
 
 # https://stackoverflow.com/questions/63735255/how-do-i-compute-bootstrapped-cross-entropy-loss-in-pytorch
 class BootstrappedCE(nn.Module):
@@ -169,6 +136,8 @@ class LossComputer:
         # TODO: use instead of hardcoded. not used right now
         self.kernel_size = 3
         self.pairwise_dilation = 2
+        self.iter = 0
+        self.warmup_iters = 10_000
 
     def compute(self, data, num_objects, it):
         """
@@ -184,6 +153,7 @@ class LossComputer:
 
             masks [0,1] are the sigmoid of logits (-inf, inf) with bg object removed
         """
+        self.iter += 1
         inv_im_trans = transforms.Normalize(
             mean=[-0.485/0.229, -0.456/0.224, -0.406/0.225],
             std=[1/0.229, 1/0.224, 1/0.225])
@@ -195,7 +165,7 @@ class LossComputer:
         losses['total_loss'] = 0
         for ti in range(1, t):
             images_rgb = 255.*inv_im_trans(data['rgb'][:,ti]) # B x 3 x H x W
-            logits = data[f'logits_{ti}']
+            logits = data[f'logits_{ti}'][:, 1:] # remove first which is bg
             # B x n_obj x H x W --> B*n_obj x 1 x H x W
             source_logits = logits.flatten(0,1)[:, None]
             num_objects = logits.shape[1] # (This is always 4 (max 3 fg objs and bg))
@@ -218,8 +188,8 @@ class LossComputer:
             bboxes = []
             obj_exist_mask = []
             for bn, m in enumerate(target_masks):
-                for i in range(num_objects):
-                    mask = (m==i).float()
+                for i in range(num_objects): 
+                    mask = (m==(i+1)).float()
                     bbox = torch.zeros_like(mask)
 
                     if mask.any():
@@ -247,28 +217,36 @@ class LossComputer:
             loss_pairwise = (pairwise_loss * weights).sum() / weights.sum().clamp(min=1.0)
             loss_projection = compute_project_term(source_logits.sigmoid(), target_bboxes)
 
-            assert loss_projection <= 2 and loss_projection >= 0, f'proj_loss is more than 2: {loss_projection}'
+#            assert loss_projection <= 2 and loss_projection >= 0, f'proj_loss is more than 2: {loss_projection}'
             losses[f'proj_loss_{ti}'] = loss_projection 
             losses[f'pair_loss_{ti}'] = loss_pairwise
-            losses['total_loss'] += losses[f'proj_loss_{ti}'] + losses[f'pair_loss_{ti}'] 
 
+#            warmup_factor = min(1., self.iter / self.warmup_iters)
+            warmup_factor = 1
+            losses['total_loss'] += losses[f'proj_loss_{ti}'] + warmup_factor * losses[f'pair_loss_{ti}'] 
 
-     #       b_save = 1
-     #       cv2.imwrite(f'vis_mask_check/rgb.png',images_rgb[b_save].permute(1,2,0).float().cpu().numpy())
-     #       cv2.imwrite(f'vis_mask_check/lab.png',images_lab[b_save][0].permute(1,2,0).float().cpu().numpy())
-     #       for i, w in enumerate(weights[4*b_save:4*b_save+4]):
-     #           w = w[0].repeat(3,1,1) # only one of the 8 consisteny maps
-     #           cv2.imwrite(f'vis_mask_check/{i}_image.png',w.permute(1,2,0).float().cpu().numpy() * 255)
-     #           cv2.imwrite(f'vis_mask_check/{i}_mask.png',target_masks[num_objects*b_save+i].repeat(3,1,1).permute(1,2,0).float().cpu().numpy() * 255)
+#        with torch.no_grad():
+#            if (self.iter % 10) == 0:
+#                pred_mask = data[f'masks_{1}'][0,0]
+#                gt_mask = data['cls_gt'][0, 1, 0]
+#                gt_box = target_bboxes[0,0]
+#                img = torch.cat([pred_mask, gt_mask, gt_box],dim=0)
+#                cv2.imwrite(f'vis_mask_check/pred_mask.png',img.repeat(3,1,1).permute(1,2,0).float().cpu().numpy() * 255)
+
+   #         b_save = 0
+   #         # save the predicted mask for batch 'b_save'
+   #         cv2.imwrite(f'vis_mask_check/pred_mask.png',data['masks_1'].amax(dim=1)[b_save][None]
+   #                     .repeat(3,1,1).permute(1,2,0).float().detach().cpu().numpy()*255)
+   #         cv2.imwrite(f'vis_mask_check/rgb.png',images_rgb[b_save].permute(1,2,0).float().cpu().numpy())
+   #         cv2.imwrite(f'vis_mask_check/lab.png',images_lab[b_save][0].permute(1,2,0).float().cpu().numpy())
+   #         for i, w in enumerate(weights[num_objects*b_save:num_objects*b_save+num_objects]):
+   #             w = w[0].repeat(3,1,1) # only one of the 8 consisteny maps
+   #             cv2.imwrite(f'vis_mask_check/{i}_image.png',w.permute(1,2,0).float().cpu().numpy() * 255)
+   #             cv2.imwrite(f'vis_mask_check/{i}_mask.png',target_masks[num_objects*b_save+i].repeat(3,1,1).permute(1,2,0).float().cpu().numpy() * 255)
+   #         print()
 
 #            write_imgs(images_lab, data, ti, images_lab_similarity, weights)
      #       print()
-            # free memory probably does nothing?
-            #del images_lab_similarity
-            #del images_lab
-            #del source_logits
-            #del target_masks
-
             #losses[f'dice_loss_{ti}'] = dice_loss(data[f'masks_{ti}'], data['cls_gt'][:,ti,0])
             #losses['total_loss'] += losses[f'dice_loss_{ti}']
 
@@ -331,3 +309,71 @@ def get_images_color_similarity(images, kernel_size=3, dilation=2):
     similarity = torch.exp(-torch.norm(diff, dim=1) * 0.5)
 
     return similarity 
+
+
+# test
+def test_loss():
+    #t1 = (torch.randn((12, 1, 300,300)) > 0.5).float()
+    t_pred = torch.zeros((384,384), dtype=torch.float32)
+    t_pred[100:150, 100:150] = 1.
+    t_pred = t_pred[None, None]
+
+    t_gt = torch.zeros_like(t_pred)
+    t_gt[:,:,100:150, 100:150] = 1.
+
+    loss = compute_project_term(t_pred, t_gt)
+    print(loss)
+
+
+    pair = compute_pairwise_term(t_pred)
+    print(pair)
+
+#test_loss()
+
+class LossComputer2:
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.bce = BootstrappedCE(config['start_warm'], config['end_warm'])
+        self.count = 0
+
+    def compute(self, data, num_objects, it):
+        self.count += 1
+        losses = defaultdict(int)
+
+        b, t = data['rgb'].shape[:2]
+
+        losses['total_loss'] = 0
+        for ti in range(1, t):
+            target_masks = data['cls_gt'][:,ti,0]
+            masks = []
+            bboxes = []
+            for bn, m in enumerate(target_masks):
+                for i in range(1): 
+                    mask = (m==(i+1)).float()
+                    bbox = torch.zeros_like(mask)
+
+                    if mask.any():
+                        x1,y1,x2,y2 = masks_to_boxes(mask[None]).long()[0]
+                        bbox[y1:y2+1, x1:x2+1] = 1.
+                    else:
+                        bbox = mask
+                    masks.append(mask)
+                    bboxes.append(bbox)
+            
+            target_masks = torch.stack(masks)[:,None]
+            target_bboxes = torch.stack(bboxes)[:,None]
+            
+            #losses[f'dice_loss_{ti}'] = compute_project_term(data[f'masks_{ti}'], target_bboxes)
+            # using logits instead
+            losses[f'dice_loss_{ti}'] = compute_project_term(data[f'logits_{ti}'][:,1:].sigmoid(), target_bboxes)
+           # losses[f'dice_loss_{ti}'] = dice_loss(data[f'masks_{ti}'], data['cls_gt'][:,ti,0])
+            losses['total_loss'] += losses[f'dice_loss_{ti}']
+
+        if (self.count % 10) == 0:
+            pred_mask = data[f'masks_{ti}'][0,0]
+            gt_mask = data['cls_gt'][0, ti, 0]
+            gt_box = target_bboxes[0,0]
+            img = torch.cat([pred_mask, gt_mask, gt_box],dim=0)
+            cv2.imwrite(f'vis_mask_check/pred_mask.png',img.repeat(3,1,1).permute(1,2,0).float().cpu().detach().numpy() * 255)
+        return losses
