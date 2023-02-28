@@ -34,6 +34,43 @@ def dice_loss(input_mask, cls_gt):
         losses.append(loss)
     return torch.cat(losses).mean()
 
+def compute_pairwise_term_neighbor(mask_logits, mask_logits_neighbor, pairwise_size, pairwise_dilation):
+	# N x T x H x W
+    assert mask_logits.dim() == 4
+
+    log_fg_prob_neigh = F.logsigmoid(mask_logits_neighbor)
+    log_bg_prob_neigh = F.logsigmoid(-mask_logits_neighbor)
+
+    log_fg_prob = F.logsigmoid(mask_logits)
+    log_bg_prob = F.logsigmoid(-mask_logits)
+
+    # when we compare neighboring images, center pixels arent always equal
+    # hence we also include center pixel 
+    log_fg_prob_unfold = unfold_patches(
+        log_fg_prob, kernel_size=pairwise_size,
+        dilation=pairwise_dilation,
+        remove_center=False 
+    )
+    log_bg_prob_unfold = unfold_patches(
+        log_bg_prob, kernel_size=pairwise_size,
+        dilation=pairwise_dilation,
+        remove_center=False
+    )
+
+    # the probability of making the same prediction = p_i * p_j + (1 - p_i) * (1 - p_j)
+    # we compute the the probability in log space to avoid numerical instability
+    log_same_fg_prob = log_fg_prob_neigh[:, :, None] + log_fg_prob_unfold
+    log_same_bg_prob = log_bg_prob_neigh[:, :, None] + log_bg_prob_unfold
+
+    max_ = torch.max(log_same_fg_prob, log_same_bg_prob)
+    log_same_prob = torch.log(
+        torch.exp(log_same_fg_prob - max_) +
+        torch.exp(log_same_bg_prob - max_)
+    ) + max_
+
+    assert torch.isclose(-torch.logexpsum(log_same_fg_prob, log_same_bg_prob)[:,0], -log_same_prob[:,0])
+    # loss = -log(prob)
+    return -log_same_prob[:, 0]
 
 def compute_pairwise_term(mask_logits, pairwise_size=3, pairwise_dilation=2):
     """
@@ -47,11 +84,11 @@ def compute_pairwise_term(mask_logits, pairwise_size=3, pairwise_dilation=2):
     log_fg_prob = F.logsigmoid(mask_logits)
     log_bg_prob = F.logsigmoid(-mask_logits)
 
-    log_fg_prob_unfold = unfold_wo_center(
+    log_fg_prob_unfold = unfold_patches(
         log_fg_prob, kernel_size=pairwise_size,
         dilation=pairwise_dilation
     )
-    log_bg_prob_unfold = unfold_wo_center(
+    log_bg_prob_unfold = unfold_patches(
         log_bg_prob, kernel_size=pairwise_size,
         dilation=pairwise_dilation
     )
@@ -125,6 +162,7 @@ class BootstrappedCE(nn.Module):
         return loss.mean(), this_p
 
 
+
 class LossComputer:
     def __init__(self, config):
         super().__init__()
@@ -138,6 +176,62 @@ class LossComputer:
         self.pairwise_dilation = 2
         self.iter = 0
         self.warmup_iters = 10_000
+
+        self.inv_im_trans = transforms.Normalize(
+            mean=[-0.485/0.229, -0.456/0.224, -0.406/0.225],
+            std=[1/0.229, 1/0.224, 1/0.225])
+    
+    def knn_loss(self, data, t):
+        """
+            Calculate the 
+
+
+        """
+        # B x T x n_obj x H x W 
+        logits = torch.stack([data[f'logits_{i+1}'][:,1:] for i in range(t)], dim=1)
+        # NT x 1 x H x W. Where N is B*n_obj
+
+        # Remove first image since no mask-prediction for it will be made
+        images_rgb = 255.*self.inv_im_trans(data['rgb'])[:,1:].flatten(0,1) # B*T x 3 x H x W
+        images_lab = [torch.as_tensor(color.rgb2lab(rgb_img.byte().permute(1, 2, 0).cpu().numpy()),
+                                        device=rgb_img.device, dtype=torch.float32).permute(2, 0, 1)[None]
+                        for rgb_img in images_rgb]
+        
+        # Self LAB similarities used for pairwise loss    B*T x K^2-1 x H x W
+        images_lab_sim = torch.cat([get_images_color_similarity(img_lab) for img_lab in images_lab])
+        
+        # list of len t, B x 1 x K^2 x H x W
+        images_lab_sim_neighs = []
+        for i in range(t):
+            # Add cyclic neighbors between consecutive frames ii and ii+1. frame t reconnects with frame 0. 
+            images_lab_sim_neighs.append(
+                torch.cat([get_neighbor_images_patch_color_similarity(images_lab[ii+i], images_lab[ii+(i+1)%t], 3, 3) 
+                            for ii in range(0, len(images_lab), t)]
+                ).unsqueeze(1)
+            ) 
+        
+        # Select topk matches
+        images_lab_sim = topk_mask()
+
+
+
+        # Calculate neighboring pairwise losses
+        pairwise_losses_neighbor = []
+        for i in range(t):
+            pairwise_losses_neighbor.append(
+                compute_pairwise_term_neighbor(
+                    src_masks[:,i:i+1], src_masks[:,(i+1)%t:1+(i+1)%t], k_size, 3
+                ) 
+            )
+        
+
+
+        # Finally, compute intra-frame pairwise loss and projection loss
+
+
+
+        
+
 
     def compute(self, data, num_objects, it):
         """
@@ -154,17 +248,16 @@ class LossComputer:
             masks [0,1] are the sigmoid of logits (-inf, inf) with bg object removed
         """
         self.iter += 1
-        inv_im_trans = transforms.Normalize(
-            mean=[-0.485/0.229, -0.456/0.224, -0.406/0.225],
-            std=[1/0.229, 1/0.224, 1/0.225])
         losses = defaultdict(int)
 
         # get batch b, and num_frames t
         b, t = data['rgb'].shape[:2]
 
+        self.knn_loss(data, t-1)
+
         losses['total_loss'] = 0
         for ti in range(1, t):
-            images_rgb = 255.*inv_im_trans(data['rgb'][:,ti]) # B x 3 x H x W
+            images_rgb = 255.*self.inv_im_trans(data['rgb'][:,ti]) # B x 3 x H x W
             logits = data[f'logits_{ti}'][:, 1:] # remove first which is bg
             # B x n_obj x H x W --> B*n_obj x 1 x H x W
             source_logits = logits.flatten(0,1)[:, None]
@@ -221,9 +314,9 @@ class LossComputer:
             losses[f'proj_loss_{ti}'] = loss_projection 
             losses[f'pair_loss_{ti}'] = loss_pairwise
 
-#            warmup_factor = min(1., self.iter / self.warmup_iters)
-            warmup_factor = 1
-            losses['total_loss'] += losses[f'proj_loss_{ti}'] + warmup_factor * losses[f'pair_loss_{ti}'] 
+            warmup_factor = min(1., self.iter / self.warmup_iters)
+#            warmup_factor = 1
+            losses['total_loss'] += losses[f'proj_loss_{ti}']# + warmup_factor * losses[f'pair_loss_{ti}'] 
 
 #        with torch.no_grad():
 #            if (self.iter % 10) == 0:
@@ -272,7 +365,7 @@ def write_imgs(images, data, ti, images_sim, weights):
     exit(1)
 
 
-def unfold_wo_center(x, kernel_size, dilation):
+def unfold_patches(x, kernel_size, dilation, remove_center=True):
     assert x.dim() == 4
     assert kernel_size % 2 == 1
 
@@ -289,11 +382,12 @@ def unfold_wo_center(x, kernel_size, dilation):
     )
 
     # remove the center pixels
-    size = kernel_size ** 2
-    unfolded_x = torch.cat((
-        unfolded_x[:, :, :size // 2],
-        unfolded_x[:, :, size // 2 + 1:]
-    ), dim=2)
+    if remove_center:
+        size = kernel_size ** 2
+        unfolded_x = torch.cat((
+            unfolded_x[:, :, :size // 2],
+            unfolded_x[:, :, size // 2 + 1:]
+        ), dim=2)
 
     return unfolded_x
 
@@ -301,7 +395,7 @@ def get_images_color_similarity(images, kernel_size=3, dilation=2):
     assert images.dim() == 4
     assert images.size(0) == 1
 
-    unfolded_images = unfold_wo_center(
+    unfolded_images = unfold_patches(
         images, kernel_size=kernel_size, dilation=dilation
     )
 
@@ -310,6 +404,47 @@ def get_images_color_similarity(images, kernel_size=3, dilation=2):
 
     return similarity 
 
+
+def get_neighbor_images_color_similarity(images, images_neighbor, kernel_size, dilation):
+    """
+        TODO: merge this with other image color similarity
+        TODO: Take into account matching radius R?
+    """
+    assert images.dim() == 4
+    assert images.size(0) == 1
+
+    unfolded_images = unfold_patches(
+        images, kernel_size=kernel_size,
+        dilation=dilation, remove_center=False
+    )
+
+    diff = images_neighbor[:, :, None] - unfolded_images
+    similarity = torch.exp(-torch.norm(diff, dim=1) * 0.5)
+
+    return similarity
+
+def get_neighbor_images_patch_color_similarity(images, images_neighbor, kernel_size, dilation):
+    # images: 1 x C x H x W
+    assert images.dim() == 4
+    assert images.size(0) == 1
+
+    unfolded_images = unfold_patches(
+        images, kernel_size=kernel_size, dilation=1, remove_center=False
+    )
+    unfolded_images_neighbor = unfold_patches(
+        images_neighbor, kernel_size=kernel_size, dilation=1, remove_center=False
+    )
+    unfolded_images = unfolded_images.flatten(1,2)
+    unfolded_images_neighbor = unfolded_images_neighbor.flatten(1,2)
+    
+    similarity = get_neighbor_images_color_similarity(unfolded_images, unfolded_images_neighbor, 3, 3)
+    return similarity
+
+def topk_mask(self, images_lab_sim, k):
+    images_lab_sim_mask = torch.zeros_like(images_lab_sim)
+    topk, indices = torch.topk(images_lab_sim, k, dim=1) # 1, 3, 5, 7
+    images_lab_sim_mask = images_lab_sim_mask.scatter(1, indices, topk)
+    return images_lab_sim_mask
 
 # test
 def test_loss():
