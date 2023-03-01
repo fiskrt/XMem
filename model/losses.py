@@ -181,23 +181,24 @@ class LossComputer:
             mean=[-0.485/0.229, -0.456/0.224, -0.406/0.225],
             std=[1/0.229, 1/0.224, 1/0.225])
     
-    def knn_loss(self, data, t):
+    def knn_loss(self, data, t, train_iter):
         """
             Calculate the 
 
-
+            TODO: send in bboxes as B*n_obj x T x H x W
         """
-        # B x T x n_obj x H x W 
-        logits = torch.stack([data[f'logits_{i+1}'][:,1:] for i in range(t)], dim=1)
-        # NT x 1 x H x W. Where N is B*n_obj
+        # B*n_obj x T x H x W  (n_obj excludes bg)
+        logits = torch.stack([data[f'logits_{i+1}'][:,1:].flatten(0,1) for i in range(t)], dim=1)
 
-        # Remove first image since no mask-prediction for it will be made
+
+        # Remove first image frame since no mask-prediction for it will be made
         images_rgb = 255.*self.inv_im_trans(data['rgb'])[:,1:].flatten(0,1) # B*T x 3 x H x W
         images_lab = [torch.as_tensor(color.rgb2lab(rgb_img.byte().permute(1, 2, 0).cpu().numpy()),
                                         device=rgb_img.device, dtype=torch.float32).permute(2, 0, 1)[None]
                         for rgb_img in images_rgb]
         
         # Self LAB similarities used for pairwise loss    B*T x K^2-1 x H x W
+        # TODO: make this into B x T x K2-1 x H x W? This is done in criterion.py
         images_lab_sim = torch.cat([get_images_color_similarity(img_lab) for img_lab in images_lab])
         
         # list of len t, B x 1 x K^2 x H x W
@@ -220,17 +221,32 @@ class LossComputer:
         for i in range(t):
             pairwise_losses_neighbor.append(
                 compute_pairwise_term_neighbor(
-                    src_masks[:,i:i+1], src_masks[:,(i+1)%t:1+(i+1)%t], k_size, 3
+                    logits[:,i:i+1], logits[:,(i+1)%t:1+(i+1)%t], k_size, 3
                 ) 
             )
         
-
-
-        # Finally, compute intra-frame pairwise loss and projection loss
-
-
-
         
+
+
+
+        # Finally, compute neighbor-independent pairwise loss and projection loss
+        # logits: NT x 1 x H x W
+        logits = logits.flatten(0,1)[:, None]
+        bboxes = bboxes.flatten(0,1)[:, None]
+        loss_projection = compute_project_term(logits.sigmoid(), bboxes)  
+        loss_pairwise = compute_pairwise_term(logits, self.kernel_size, 2)
+        
+
+        losses[f'proj_loss'] = loss_projection 
+        losses[f'pair_loss'] = loss_pairwise
+
+        #for i, loss in enumerate()
+        #    losses[f'neigh_loss_{i}'] = loss_pairwise
+        
+        lambda_ = 1.
+        warmup_factor = min(1., train_iter / self.warmup_iters)
+        #losses['total_loss'] += losses[f'proj_loss_{ti}'] + warmup_factor * losses[f'pair_loss_{ti}']
+        #                        + lambda_ * warmup_factor * sum(losses[f'neigh_loss_{i}'] for i in range) 
 
 
     def compute(self, data, num_objects, it):
@@ -253,7 +269,7 @@ class LossComputer:
         # get batch b, and num_frames t
         b, t = data['rgb'].shape[:2]
 
-        self.knn_loss(data, t-1)
+        self.knn_loss(data, t-1, it)
 
         losses['total_loss'] = 0
         for ti in range(1, t):
@@ -440,7 +456,18 @@ def get_neighbor_images_patch_color_similarity(images, images_neighbor, kernel_s
     similarity = get_neighbor_images_color_similarity(unfolded_images, unfolded_images_neighbor, 3, 3)
     return similarity
 
-def topk_mask(self, images_lab_sim, k):
+def topk_mask(images_lab_sim, k):
+    """
+        Return images_lab_sim with everything zerod out
+        except for the top k entries in dimension 1.
+        [[0.,  1.,  2.,  3.],
+        [ 4.,  5.,  6.,  7.],
+        [ 8.,  9., 10., 11.]]
+        ----------------------->
+        [[0.,  0.,  2.,  3.],
+        [ 0.,  0.,  6.,  7.],
+        [ 0.,  0., 10., 11.]]
+    """
     images_lab_sim_mask = torch.zeros_like(images_lab_sim)
     topk, indices = torch.topk(images_lab_sim, k, dim=1) # 1, 3, 5, 7
     images_lab_sim_mask = images_lab_sim_mask.scatter(1, indices, topk)
