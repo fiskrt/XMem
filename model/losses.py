@@ -182,7 +182,7 @@ class LossComputer:
             mean=[-0.485/0.229, -0.456/0.224, -0.406/0.225],
             std=[1/0.229, 1/0.224, 1/0.225])
     
-    def knn_loss(self, data, bboxes, t, train_iter):
+    def knn_loss(self, data, bboxes, b, t, train_iter):
         """
             Calculate the 
 
@@ -198,23 +198,30 @@ class LossComputer:
                         for rgb_img in images_rgb]
         
         # Self LAB similarities used for pairwise loss    B*T x K^2-1 x H x W
-        # TODO: make this into B x T x K2-1 x H x W? This is done in criterion.py
         images_lab_sim = torch.cat([get_images_color_similarity(img_lab) for img_lab in images_lab])
+        # reshape into B x T x K2-1 x H x W
+        images_lab_sim = images_lab_sim.reshape(b, t, *images_lab_sim.shape[-3:])
+        # TODO: remove hardcoded 3, should be num_obj
+        # N*T x K2-1 x H x W
+        images_lab_sim = images_lab_sim.repeat_interleave(3, dim=0).flatten(0,1)
+
         
         # list of len t, B x 1 x K^2 x H x W
         images_lab_sim_neighs = []
         for i in range(t):
             # Add cyclic neighbors between consecutive frames ii and ii+1. frame t reconnects with frame 0. 
-            images_lab_sim_neighs.append(
-                torch.cat([get_neighbor_images_patch_color_similarity(images_lab[ii+i], images_lab[ii+(i+1)%t], 3, 3) 
+            neigh_lab_sim = torch.cat(
+                [get_neighbor_images_patch_color_similarity(images_lab[ii+i], images_lab[ii+(i+1)%t], 3, 3) 
                             for ii in range(0, len(images_lab), t)]
-                ).unsqueeze(1)
-            ) 
-        
-        # Select topk matches
-        images_lab_sim = topk_mask()
+            )#.unsqueeze(1)
 
+            # for every img/obj I want top k correspondences in other image
+            neigh_lab_sim_top = topk_mask(neigh_lab_sim, k=5)
 
+            # TODO: remove hardcoded 3
+            # B*n_obj x K2 x H x W
+            neigh_lab_sim_top = neigh_lab_sim_top.repeat_interleave(3, dim=0)
+            images_lab_sim_neighs.append(neigh_lab_sim_top)
 
         # Calculate neighboring pairwise log probabilities
         pairwise_logprob_neighbor = []
@@ -240,13 +247,10 @@ class LossComputer:
         weights = (images_lab_sim >= self.color_threshold).float() * target_masks.float()
         loss_pairwise = (pairwise_logprobs* weights).sum() / weights.sum().clamp(min=1.0) 
 
-
         # Calculate weights for neighbors, and then losses using weights.
-        loss_pairwise_neighs = []
         for i in range(t):
             weight_neigh = (images_lab_sim_neighs[i] >= self.col_thresh_neigh).float() * bbox_time_sum
             losses[f'neigh_loss_{i}'] = (pairwise_logprob_neighbor[i] * weight_neigh).sum() / weight_neigh.sum().clamp(min=1.0)
-
 
         lambda_ = 1.
         warmup_factor = min(1., train_iter / self.warmup_iters)
@@ -277,7 +281,7 @@ class LossComputer:
         b, t = data['rgb'].shape[:2]
 
         no = data['logits_1'][:, 1:].shape[1]
-        self.knn_loss(data, mask_to_bbox(data['cls_gt'][:, 1:], no), t-1, it)
+        self.knn_loss(data, mask_to_bbox(data['cls_gt'][:, 1:], no), b, t-1, it)
 
         losses['total_loss'] = 0
         for ti in range(1, t):
