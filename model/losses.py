@@ -250,6 +250,19 @@ class LossComputer:
         weights = (images_lab_sim >= self.color_threshold).float() * bboxes.float()
         loss_pairwise = (pairwise_logprobs* weights).sum() / weights.sum().clamp(min=1.0) 
 
+        with torch.no_grad():
+            pred_mask = data[f'masks_{1}'][0,0]
+            gt_mask = data['cls_gt'][0, 1, 0]
+            gt_box = bboxes[0,0]
+            img = torch.cat([pred_mask, gt_mask, gt_box],dim=0)
+            # now check the lab similarities
+            img_lower = torch.cat([images_lab_sim[0,0], images_lab_sim_neighs[0][0,0], images_lab_sim_neighs[0][0,4]],dim=0)
+            
+            img = torch.cat([img, img_lower], dim=1)
+            cv2.imwrite(f'vis_mask_check/pred_mask.png',img.repeat(3,1,1).permute(1,2,0).float().cpu().numpy() * 255)
+
+            #TODO: visualize rgb sequence with cyclic neighbor color similarities beneath
+
         losses = defaultdict(int)
         # Calculate weights for neighbors, and then losses using weights.
         for i in range(t):
@@ -286,7 +299,8 @@ class LossComputer:
         b, t = data['rgb'].shape[:2]
 
         no = data['logits_1'][:, 1:].shape[1]
-        return self.knn_loss(data, mask_to_bbox(data['cls_gt'][:, 1:], no), b, t-1, it)
+        bboxes = mask_to_bbox(data['cls_gt'][:, 1:], no)
+        return self.knn_loss(data, bboxes, b, t-1, it)
 
         losses['total_loss'] = 0
         for ti in range(1, t):
@@ -500,8 +514,8 @@ def mask_to_bbox(gt_mask, num_objects):
     # mask: 8 x B x 1 x H x W
     gt_mask = gt_mask.permute(1,0,2,3,4)
 
-    obj_exist_mask = []
-    masks = []
+    #obj_exist_mask = []
+    #masks = []
     bboxes = []
     for t, m_t in enumerate(gt_mask):
         for bn, m in enumerate(m_t):
@@ -511,20 +525,20 @@ def mask_to_bbox(gt_mask, num_objects):
 
                 if mask.any():
                     x1,y1,x2,y2 = masks_to_boxes(mask).long()[0]
-                    bbox[y1:y2+1, x1:x2+1] = 1.
-                    obj_exist_mask.append(True)
+                    bbox[0, y1:y2+1, x1:x2+1] = 1.
+    #               obj_exist_mask.append(True)
                 else:
                     bbox = mask
-                    obj_exist_mask.append(False)
-                masks.append(mask)
+    #                obj_exist_mask.append(False)
+    #            masks.append(mask)
                 bboxes.append(bbox)
     
     # size B*n_obj. if there is an object in that entry
     # all-zero entries affect the dice loss for example 
-    obj_exist_mask = torch.tensor(obj_exist_mask)
-    target_masks = torch.stack(masks)
-    target_bboxes = torch.stack(bboxes)
+    #obj_exist_mask = torch.tensor(obj_exist_mask)
+    #target_masks = torch.stack(masks)
 
+    target_bboxes = torch.stack(bboxes)
     return target_bboxes.reshape(-1, gt_mask.shape[0], gt_mask.shape[-2], gt_mask.shape[-1])
             
 # test
