@@ -68,7 +68,7 @@ def compute_pairwise_term_neighbor(mask_logits, mask_logits_neighbor, pairwise_s
         torch.exp(log_same_bg_prob - max_)
     ) + max_
 
-    assert torch.isclose(-torch.logexpsum(log_same_fg_prob, log_same_bg_prob)[:,0], -log_same_prob[:,0])
+    assert torch.isclose(-torch.logaddexp(log_same_fg_prob, log_same_bg_prob)[:,0], -log_same_prob[:,0]).all()
     # loss = -log(prob)
     return -log_same_prob[:, 0]
 
@@ -171,7 +171,10 @@ class LossComputer:
 
         self.color_threshold = 0.3
         self.col_thresh_neigh = 0.05
-        
+
+        self.kernel_size_neigh = 3
+        self.dilation_size_neigh = 3
+
         # TODO: use instead of hardcoded. not used right now
         self.kernel_size = 3
         self.pairwise_dilation = 2
@@ -228,7 +231,7 @@ class LossComputer:
         for i in range(t):
             pairwise_logprob_neighbor.append(
                 compute_pairwise_term_neighbor(
-                    logits[:,i:i+1], logits[:,(i+1)%t:1+(i+1)%t], k_size, 3
+                    logits[:,i:i+1], logits[:,(i+1)%t:1+(i+1)%t], self.kernel_size_neigh, self.dilation_size_neigh 
                 ) 
             )
         
@@ -244,9 +247,10 @@ class LossComputer:
         loss_projection = compute_project_term(logits.sigmoid(), bboxes)  
         pairwise_logprobs = compute_pairwise_term(logits, self.kernel_size, 2)
        
-        weights = (images_lab_sim >= self.color_threshold).float() * target_masks.float()
+        weights = (images_lab_sim >= self.color_threshold).float() * bboxes.float()
         loss_pairwise = (pairwise_logprobs* weights).sum() / weights.sum().clamp(min=1.0) 
 
+        losses = defaultdict(int)
         # Calculate weights for neighbors, and then losses using weights.
         for i in range(t):
             weight_neigh = (images_lab_sim_neighs[i] >= self.col_thresh_neigh).float() * bbox_time_sum
@@ -256,8 +260,9 @@ class LossComputer:
         warmup_factor = min(1., train_iter / self.warmup_iters)
         losses[f'proj_loss'] = loss_projection 
         losses[f'pair_loss'] = loss_pairwise
-        losses['total_loss'] += (losses[f'proj_loss_{ti}'] + warmup_factor * losses[f'pair_loss_{ti}']
+        losses['total_loss'] += (losses[f'proj_loss'] + warmup_factor * losses[f'pair_loss']
                                 + lambda_ * warmup_factor * sum(losses[f'neigh_loss_{i}'] for i in range(t)))
+        return losses
 
 
     def compute(self, data, num_objects, it):
@@ -281,7 +286,7 @@ class LossComputer:
         b, t = data['rgb'].shape[:2]
 
         no = data['logits_1'][:, 1:].shape[1]
-        self.knn_loss(data, mask_to_bbox(data['cls_gt'][:, 1:], no), b, t-1, it)
+        return self.knn_loss(data, mask_to_bbox(data['cls_gt'][:, 1:], no), b, t-1, it)
 
         losses['total_loss'] = 0
         for ti in range(1, t):
