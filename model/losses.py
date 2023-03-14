@@ -203,11 +203,19 @@ class LossComputer:
         # Self LAB similarities used for pairwise loss    B*T x K^2-1 x H x W
         images_lab_sim = torch.cat([get_images_color_similarity(img_lab) for img_lab in images_lab])
         # reshape into B x T x K2-1 x H x W
-        images_lab_sim = images_lab_sim.reshape(b, t, *images_lab_sim.shape[-3:])
+        images_lab_sim = images_lab_sim.reshape(b, t, *images_lab_sim.shape[-3:]).repeat_interleave(3, dim=0).flatten(0,1)
+        with torch.no_grad():
+            rows = []
+            for ti in range(t):
+                rows.append(
+                    torch.cat([images_lab_sim[6*ti+n,0] for n in range(6)], dim=1)
+                )
+            img = torch.cat(rows, dim=0)
+            cv2.imwrite(f'vis_mask_check/images_lab_sim.png',img.repeat(3,1,1).permute(1,2,0).float().cpu().numpy() * 255)
+
         # TODO: remove hardcoded 3, should be num_obj
         # N*T x K2-1 x H x W
-        images_lab_sim = images_lab_sim.repeat_interleave(3, dim=0).flatten(0,1)
-
+       # images_lab_sim = images_lab_sim.repeat_interleave(3, dim=0).flatten(0,1)
         
         # list of len t, B*n_obj x K^2 x H x W
         images_lab_sim_neighs = []
@@ -241,6 +249,7 @@ class LossComputer:
         # Finally, compute neighbor-independent pairwise loss and projection loss
         # logits: NT x 1 x H x W
         logits = logits.flatten(0,1)[:, None]
+        # first (n_obj+B) pictures are batch 1: obj 1 obj 2 obj n batch 2: obj 1 obj 2 obj n 
         bboxes = bboxes.flatten(0,1)[:, None]
 
         # Calculate the time-independent pairwise and projection loss
@@ -251,6 +260,26 @@ class LossComputer:
         weights = (images_lab_sim >= self.color_threshold).float() * bboxes.float()
         loss_pairwise = (pairwise_logprobs * weights).sum() / weights.sum().clamp(min=1.0) 
 
+        with torch.no_grad():
+            rows = []
+            for ti in range(t):
+                rows.append(
+                    torch.cat([bboxes[6*ti+n,0] for n in range(6)], dim=1)
+                )
+            img = torch.cat(rows, dim=0)
+            cv2.imwrite(f'vis_mask_check/bboxes.png',img.repeat(3,1,1).permute(1,2,0).float().cpu().numpy() * 255)
+
+        with torch.no_grad():
+            rows = []
+            for ti in range(t):
+                rows.append(
+                    torch.cat([logits.sigmoid()[6*ti+n,0] for n in range(6)], dim=1)
+                )
+            img = torch.cat(rows, dim=0)
+            cv2.imwrite(f'vis_mask_check/logits.png',img.repeat(3,1,1).permute(1,2,0).float().cpu().numpy() * 255)
+                   
+                        
+        print('drop top rain drops')
 #        with torch.no_grad():
 #            print('saving images on!')
 #            pred_mask = data[f'masks_{1}'][0,0]
@@ -526,14 +555,14 @@ def mask_to_bbox(gt_mask, num_objects):
     assert gt_mask.size(2) == 1
 
     # mask: 8 x B x 1 x H x W
-    gt_mask = gt_mask.permute(1,0,2,3,4)
+    #gt_mask = gt_mask.permute(1,0,2,3,4)
 
     #obj_exist_mask = []
     #masks = []
     bboxes = []
-    for t, m_t in enumerate(gt_mask):
-        for bn, m in enumerate(m_t):
-            for i in range(num_objects): 
+    for bn, m_b in enumerate(gt_mask):
+        for i in range(num_objects): 
+            for t, m in enumerate(m_b):
                 mask = (m==(i+1)).float()
                 bbox = torch.zeros_like(mask)
 
@@ -553,7 +582,7 @@ def mask_to_bbox(gt_mask, num_objects):
     #target_masks = torch.stack(masks)
 
     target_bboxes = torch.stack(bboxes)
-    return target_bboxes.reshape(-1, gt_mask.shape[0], gt_mask.shape[-2], gt_mask.shape[-1])
+    return target_bboxes.reshape(-1, gt_mask.shape[1], gt_mask.shape[-2], gt_mask.shape[-1])
             
 # test
 def test_loss():
