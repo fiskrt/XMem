@@ -170,7 +170,7 @@ class LossComputer:
         self.bce = BootstrappedCE(config['start_warm'], config['end_warm'])
 
         self.color_threshold = 0.3
-        self.col_thresh_neigh = 0.05
+        self.col_thresh_neigh = 0.01#.000001
 
         self.kernel_size_neigh = 3
         self.dilation_size_neigh = 3
@@ -209,7 +209,7 @@ class LossComputer:
         images_lab_sim = images_lab_sim.repeat_interleave(3, dim=0).flatten(0,1)
 
         
-        # list of len t, B x 1 x K^2 x H x W
+        # list of len t, B*n_obj x K^2 x H x W
         images_lab_sim_neighs = []
         for i in range(t):
             # Add cyclic neighbors between consecutive frames ii and ii+1. frame t reconnects with frame 0. 
@@ -245,23 +245,35 @@ class LossComputer:
 
         # Calculate the time-independent pairwise and projection loss
         loss_projection = compute_project_term(logits.sigmoid(), bboxes)  
-        pairwise_logprobs = compute_pairwise_term(logits, self.kernel_size, 2)
+        # N * 3 x H x W -> N*T x 3 x H x W
+        pairwise_logprobs = compute_pairwise_term(logits, self.kernel_size, self.pairwise_dilation)
        
         weights = (images_lab_sim >= self.color_threshold).float() * bboxes.float()
-        loss_pairwise = (pairwise_logprobs* weights).sum() / weights.sum().clamp(min=1.0) 
+        loss_pairwise = (pairwise_logprobs * weights).sum() / weights.sum().clamp(min=1.0) 
 
-        with torch.no_grad():
-            pred_mask = data[f'masks_{1}'][0,0]
-            gt_mask = data['cls_gt'][0, 1, 0]
-            gt_box = bboxes[0,0]
-            img = torch.cat([pred_mask, gt_mask, gt_box],dim=0)
-            # now check the lab similarities
-            img_lower = torch.cat([images_lab_sim[0,0], images_lab_sim_neighs[0][0,0], images_lab_sim_neighs[0][0,4]],dim=0)
-            
-            img = torch.cat([img, img_lower], dim=1)
-            cv2.imwrite(f'vis_mask_check/pred_mask.png',img.repeat(3,1,1).permute(1,2,0).float().cpu().numpy() * 255)
+#        with torch.no_grad():
+#            print('saving images on!')
+#            pred_mask = data[f'masks_{1}'][0,0]
+#            # TODO: make sure these masks line up with gt and bbox, they do not RN
+#            gt_mask = data['cls_gt'][0, 1, 0]
+#            gt_box = bboxes[0,0]
+#            img = torch.cat([pred_mask, gt_mask, gt_box],dim=0)
+#            # now check the lab similarities
+#            img_lower = torch.cat([images_lab_sim[0,0], images_lab_sim_neighs[0][0,0], images_lab_sim_neighs[0][0,4]],dim=0)
+#            
+#            img = torch.cat([img, img_lower], dim=1)
+#            cv2.imwrite(f'vis_mask_check/pred_mask.png',img.repeat(3,1,1).permute(1,2,0).float().cpu().numpy() * 255)
+#
+#            # B*T x 3 x H x W
+#            img_seq_t = torch.cat([images_rgb[i] for i in range(t)],dim=2).permute(1,2,0)
+#
+#            # list of len t, B*n_obj x K^2 x H x W. Batch 0, obj 0, upper left pixel
+#            img_seq_b = torch.cat([images_lab_sim_neighs[i][0,0]>=self.col_thresh_neigh for i in range(t)],dim=1).repeat(3,1,1).permute(1,2,0)*255
+#
+#            img2 = torch.cat([img_seq_t, img_seq_b]).float().cpu().numpy()
+#
+#            cv2.imwrite(f'vis_mask_check/sequence.png',img2)
 
-            #TODO: visualize rgb sequence with cyclic neighbor color similarities beneath
 
         losses = defaultdict(int)
         # Calculate weights for neighbors, and then losses using weights.
@@ -269,11 +281,12 @@ class LossComputer:
             weight_neigh = (images_lab_sim_neighs[i] >= self.col_thresh_neigh).float() * bbox_time_sum
             losses[f'neigh_loss_{i}'] = (pairwise_logprob_neighbor[i] * weight_neigh).sum() / weight_neigh.sum().clamp(min=1.0)
 
-        lambda_ = 1.
+        # TODO: have 0 right now make sure old setup works
+        lambda_ = 0.
         warmup_factor = min(1., train_iter / self.warmup_iters)
-        losses[f'proj_loss'] = loss_projection 
-        losses[f'pair_loss'] = loss_pairwise
-        losses['total_loss'] += (losses[f'proj_loss'] + warmup_factor * losses[f'pair_loss']
+        losses['proj_loss'] = loss_projection
+        losses['pair_loss'] = loss_pairwise
+        losses['total_loss'] += (losses['proj_loss'] + warmup_factor * losses['pair_loss']
                                 + lambda_ * warmup_factor * sum(losses[f'neigh_loss_{i}'] for i in range(t)))
         return losses
 
@@ -475,6 +488,7 @@ def get_neighbor_images_patch_color_similarity(images, images_neighbor, kernel_s
     assert images.dim() == 4
     assert images.size(0) == 1
 
+    # TODO: why dilation=1 here, and also why always 3,3 below?
     unfolded_images = unfold_patches(
         images, kernel_size=kernel_size, dilation=1, remove_center=False
     )
