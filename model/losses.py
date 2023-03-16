@@ -170,7 +170,7 @@ class LossComputer:
         self.bce = BootstrappedCE(config['start_warm'], config['end_warm'])
 
         self.color_threshold = 0.3
-        self.col_thresh_neigh = 0.01#.000001
+        self.col_thresh_neigh = 0.01
 
         self.kernel_size_neigh = 3
         self.dilation_size_neigh = 3
@@ -204,14 +204,6 @@ class LossComputer:
         images_lab_sim = torch.cat([get_images_color_similarity(img_lab) for img_lab in images_lab])
         # reshape into B x T x K2-1 x H x W
         images_lab_sim = images_lab_sim.reshape(b, t, *images_lab_sim.shape[-3:]).repeat_interleave(3, dim=0).flatten(0,1)
-        with torch.no_grad():
-            rows = []
-            for ti in range(t):
-                rows.append(
-                    torch.cat([images_lab_sim[6*ti+n,0] for n in range(6)], dim=1)
-                )
-            img = torch.cat(rows, dim=0)
-            cv2.imwrite(f'vis_mask_check/images_lab_sim.png',img.repeat(3,1,1).permute(1,2,0).float().cpu().numpy() * 255)
 
         # TODO: remove hardcoded 3, should be num_obj
         # N*T x K2-1 x H x W
@@ -260,26 +252,16 @@ class LossComputer:
         weights = (images_lab_sim >= self.color_threshold).float() * bboxes.float()
         loss_pairwise = (pairwise_logprobs * weights).sum() / weights.sum().clamp(min=1.0) 
 
-        with torch.no_grad():
-            rows = []
-            for ti in range(t):
-                rows.append(
-                    torch.cat([bboxes[6*ti+n,0] for n in range(6)], dim=1)
-                )
-            img = torch.cat(rows, dim=0)
-            cv2.imwrite(f'vis_mask_check/bboxes.png',img.repeat(3,1,1).permute(1,2,0).float().cpu().numpy() * 255)
+        #with torch.no_grad():
+        #    rows = []
+        #    for ti in range(t):
+        #        rows.append(
+        #            torch.cat([bboxes[6*ti+n,0] for n in range(6)], dim=1)
+        #        )
+        #    img = torch.cat(rows, dim=0)
+        #    cv2.imwrite(f'vis_mask_check/bboxes.png',img.repeat(3,1,1).permute(1,2,0).float().cpu().numpy() * 255)
 
-        with torch.no_grad():
-            rows = []
-            for ti in range(t):
-                rows.append(
-                    torch.cat([logits.sigmoid()[6*ti+n,0] for n in range(6)], dim=1)
-                )
-            img = torch.cat(rows, dim=0)
-            cv2.imwrite(f'vis_mask_check/logits.png',img.repeat(3,1,1).permute(1,2,0).float().cpu().numpy() * 255)
-                   
-                        
-        print('drop top rain drops')
+        #print('drop top rain drops')
 #        with torch.no_grad():
 #            print('saving images on!')
 #            pred_mask = data[f'masks_{1}'][0,0]
@@ -294,14 +276,22 @@ class LossComputer:
 #            cv2.imwrite(f'vis_mask_check/pred_mask.png',img.repeat(3,1,1).permute(1,2,0).float().cpu().numpy() * 255)
 #
 #            # B*T x 3 x H x W
-#            img_seq_t = torch.cat([images_rgb[i] for i in range(t)],dim=2).permute(1,2,0)
+#            img_seq_t = torch.cat([images_rgb[i] for i in range(t)],dim=1).permute(1,2,0)
 #
-#            # list of len t, B*n_obj x K^2 x H x W. Batch 0, obj 0, upper left pixel
-#            img_seq_b = torch.cat([images_lab_sim_neighs[i][0,0]>=self.col_thresh_neigh for i in range(t)],dim=1).repeat(3,1,1).permute(1,2,0)*255
+#            row = []
+#            for i in range(t):
+#                # list of len t, B*n_obj x K^2 x H x W. Batch 0, obj 0, upper left pixel
+#                row.append(
+#                    torch.cat([images_lab_sim_neighs[i][n,0]>=self.col_thresh_neigh for n in range(6)],dim=1).repeat(3,1,1).permute(1,2,0)*255
+#                )
+#            img_seq_b = torch.cat(row)
 #
-#            img2 = torch.cat([img_seq_t, img_seq_b]).float().cpu().numpy()
+#            img2 = torch.cat([img_seq_t, img_seq_b], dim=1).float().cpu().numpy()
 #
 #            cv2.imwrite(f'vis_mask_check/sequence.png',img2)
+#
+#            img3 = torch.cat([bbox_time_sum[i] for i in range(6)],dim=1).repeat(3,1,1).permute(1,2,0).float().cpu().numpy()*255
+#            cv2.imwrite(f'vis_mask_check/bbox_time_union.png',img3)
 
 
         losses = defaultdict(int)
@@ -310,13 +300,13 @@ class LossComputer:
             weight_neigh = (images_lab_sim_neighs[i] >= self.col_thresh_neigh).float() * bbox_time_sum
             losses[f'neigh_loss_{i}'] = (pairwise_logprob_neighbor[i] * weight_neigh).sum() / weight_neigh.sum().clamp(min=1.0)
 
-        # TODO: have 0 right now make sure old setup works
-        lambda_ = 0.
+        lambda_ = 0.125
         warmup_factor = min(1., train_iter / self.warmup_iters)
         losses['proj_loss'] = loss_projection
         losses['pair_loss'] = loss_pairwise
-        losses['total_loss'] += (losses['proj_loss'] + warmup_factor * losses['pair_loss']
-                                + lambda_ * warmup_factor * sum(losses[f'neigh_loss_{i}'] for i in range(t)))
+        losses['neigh_mean'] = 1./t * sum(losses[f'neigh_loss_{i}'] for i in range(t))
+        losses['total_loss'] += (losses['proj_loss'] + warmup_factor * losses['pair_loss'] + 
+                                lambda_ * warmup_factor * losses['neigh_mean'])
         return losses
 
 
