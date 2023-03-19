@@ -183,6 +183,8 @@ class VOSDataset(Dataset):
                 target_objects = labels.tolist()
                 break
 
+        # We have loaded the gt mask palettised and if there are more objects we select
+        # max_num_obj randomly from all the objects.
         if len(target_objects) > self.max_num_obj:
             target_objects = np.random.choice(target_objects, size=self.max_num_obj, replace=False)
 
