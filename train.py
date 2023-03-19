@@ -94,7 +94,7 @@ for si, stage in enumerate(stages_to_perform):
     if raw_config['load_checkpoint'] is not None:
         total_iter = model.load_checkpoint(raw_config['load_checkpoint'])
         raw_config['load_checkpoint'] = None
-        print('Previously trained model loaded!')
+        print(f'Previously trained model loaded! Continuing training at iteration: {total_iter}')
     else:
         total_iter = 0
 
@@ -124,16 +124,16 @@ for si, stage in enumerate(stages_to_perform):
 
     def renew_vos_loader(max_skip, finetune=False):
         # //5 because we only have annotation for every five frames
-#        yv_dataset = VOSDataset(path.join(yv_root, 'JPEGImages'), 
-#                            path.join(yv_root, 'Annotations'), max_skip//5, is_bl=False, subset=load_sub_yv(), num_frames=config['num_frames'], finetune=finetune)
+        yv_dataset = VOSDataset(path.join(yv_root, 'JPEGImages'), 
+                            path.join(yv_root, 'Annotations'), max_skip//5, is_bl=False, subset=load_sub_yv(), num_frames=config['num_frames'], finetune=finetune)
         davis_dataset = VOSDataset(path.join(davis_root, 'JPEGImages', '480p'), 
                             path.join(davis_root, 'Annotations', '480p'), max_skip, is_bl=False, subset=load_sub_davis(), num_frames=config['num_frames'], finetune=finetune)
-#        train_dataset = davis_dataset
-        train_dataset = ConcatDataset([davis_dataset])
+        #train_dataset = ConcatDataset([davis_dataset])
+        train_dataset = ConcatDataset([davis_dataset]*5 + [yv_dataset])
 
-        #print(f'YouTube dataset size: {len(yv_dataset)}')
+        print(f'YouTube dataset size: {len(yv_dataset)}')
         print(f'DAVIS dataset size: {len(davis_dataset)}')
-        #print(f'Concat dataset size: {len(train_dataset)}')
+        print(f'Concat dataset size: {len(train_dataset)}')
         print(f'Renewed with {max_skip=}')
 
         return construct_loader(train_dataset)
@@ -184,8 +184,8 @@ for si, stage in enumerate(stages_to_perform):
         # stage 2 or 3
         increase_skip_fraction = [0.1, 0.3, 0.9, 100]
         # VOS dataset, 480p is used for both datasets
-#        yv_root = path.join(path.expanduser(config['yv_root']), 'train_480p')
-        yv_root = path.join(path.expanduser(config['davis_root']), '2017', 'trainval')
+        yv_root = path.join(path.expanduser(config['yv_root']), 'train_480p')
+#        yv_root = path.join(path.expanduser(config['davis_root']), '2017', 'trainval')
         davis_root = path.join(path.expanduser(config['davis_root']), '2017', 'trainval')
 
         train_sampler, train_loader = renew_vos_loader(5)
@@ -198,6 +198,7 @@ for si, stage in enumerate(stages_to_perform):
     total_epoch = math.ceil(config['iterations']/len(train_loader))
     current_epoch = total_iter // len(train_loader)
     print(f'We approximately use {total_epoch} epochs.')
+    print(f'Using learning rate: {config["lr"]}')
     if stage != '0':
         change_skip_iter = [round(config['iterations']*f) for f in increase_skip_fraction]
         # Skip will only change after an epoch, not in the middle
