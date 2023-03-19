@@ -9,7 +9,8 @@ counter = 0
 compare = True
 dim=0
 
-for i, category in enumerate(['pigs']):
+for i, category in enumerate(['pigs', 'blackswan', 'india', 'breakdance']):
+    # when compare==True result will be on top/left.
     result = 'd17_both_scratch_NOCROP_warmup_s3_50k'
     result2 = 'd17_bcedice_scratch_NOCROP_s3_50k'
 
@@ -17,15 +18,15 @@ for i, category in enumerate(['pigs']):
     path_mask2 = f'./results/{result2}/{category}/'
     path_img = f'../DAVIS/2017/trainval/JPEGImages/480p/{category}/'
 
-    fourcc = cv2.VideoWriter_fourcc(*'MJPG')
-    #fourcc = cv2.VideoWriter_fourcc(*'avc1')
     if i == 0:
+        fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+        #fourcc = cv2.VideoWriter_fourcc(*'avc1')
         with Image.open(path_mask+'00000.png') as m:
             size = m.size
             if compare:
                 size = (2*size[0], size[1]) if dim==1 else (size[0], 2*size[1])
             # size is passed in the reverse way (WxH)
-            writer = cv2.VideoWriter(f"videos/{result}-{category}-COMP0.avi",fourcc, 6, size)
+            writer = cv2.VideoWriter(f"videos/{result}-{category}-multi.avi",fourcc, 6, size)
 
 
     for mask in os.listdir(path_mask):
