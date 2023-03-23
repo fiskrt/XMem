@@ -65,7 +65,8 @@ for si, stage in enumerate(stages_to_perform):
         raise ValueError('Batch size must be divisible by the number of GPUs.')
     config['batch_size'] //= config['num_gpus']
     config['num_workers'] //= config['num_gpus']
-    print(f'We are assuming {config["num_gpus"]} GPUs.')
+    print(f'We are assuming {config["num_gpus"]} GPUs,' 
+            f' batch size {config["batch_size"]}/GPU and num workers {config["num_workers"]}')
 
     print(f'We are now starting stage {stage}')
 
