@@ -296,9 +296,9 @@ class LossComputer:
         losses = self.knn_loss(data, bboxes, b, t-1, it)
 
         # calculate IoU using gt and predictions
-        #if (it%5)==0:
-        #    masks = torch.stack([data[f'masks_{i}'].flatten(0,1) for i in range(1,t)], dim=1)
-        #    losses['IoU']=dice_coefficient(masks, gt_masks)
+#        if (it%5)==0:
+        masks = torch.stack([data[f'masks_{i}'].flatten(0,1) for i in range(1,t)], dim=1)
+        losses['IoU']=dice_coefficient(masks.flatten(0,1), gt_masks.flatten(0,1))
 
         return losses
 
