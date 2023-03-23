@@ -115,7 +115,6 @@ class LossComputer:
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.bce = BootstrappedCE(config['start_warm'], config['end_warm'])
 
         self.color_threshold = 0.3
         self.col_thresh_neigh = 0.01
@@ -129,13 +128,14 @@ class LossComputer:
         self.iter = 0
         self.warmup_iters = 10_000
 
+        # TODO: set to t
         self.tube_len = 5
 
         self.inv_im_trans = transforms.Normalize(
             mean=[-0.485/0.229, -0.456/0.224, -0.406/0.225],
             std=[1/0.229, 1/0.224, 1/0.225])
     
-    def knn_loss(self, data, bboxes, b, t, train_iter, temporal=False):
+    def knn_loss(self, data, bboxes, b, t, train_iter):
         """
             Calculate the 
 
@@ -159,7 +159,7 @@ class LossComputer:
         # N*T x K2-1 x H x W
        # images_lab_sim = images_lab_sim.repeat_interleave(3, dim=0).flatten(0,1)
 
-        if temporal: 
+        if not self.config['no_temporal_loss']: 
             # list of len t, B*n_obj x K^2 x H x W
             images_lab_sim_neighs = []
             # rand between [0, t-self.tube_len]
@@ -200,11 +200,13 @@ class LossComputer:
 
         # Calculate the time-independent pairwise and projection loss
         loss_projection = compute_project_term(logits.sigmoid(), bboxes)  
-        # N * 3 x H x W -> N*T x 3 x H x W
-        pairwise_logprobs = compute_pairwise_term(logits, self.kernel_size, self.pairwise_dilation)
-       
-        weights = (images_lab_sim >= self.color_threshold).float() * bboxes.float()
-        loss_pairwise = (pairwise_logprobs * weights).sum() / weights.sum().clamp(min=1.0) 
+
+        if not self.config['no_pairwise_loss']: 
+            # N * 3 x H x W -> N*T x 3 x H x W
+            pairwise_logprobs = compute_pairwise_term(logits, self.kernel_size, self.pairwise_dilation)
+        
+            weights = (images_lab_sim >= self.color_threshold).float() * bboxes.float()
+            loss_pairwise = (pairwise_logprobs * weights).sum() / weights.sum().clamp(min=1.0) 
 
         #with torch.no_grad():
         #    rows = []
@@ -249,19 +251,21 @@ class LossComputer:
 #
 
         losses = defaultdict(int)
-        if temporal:
+        if not self.config['no_temporal_loss']: 
             # Calculate weights for neighbors, and then losses using weights.
             for i in range(self.tube_len):
                 weight_neigh = (images_lab_sim_neighs[i] >= self.col_thresh_neigh).float() * bbox_time_sum
                 losses[f'neigh_loss_{i}'] = (pairwise_logprob_neighbor[i] * weight_neigh).sum() / weight_neigh.sum().clamp(min=1.0)
 
         warmup_factor = min(1., train_iter / self.warmup_iters)
-        losses['proj_loss'] = loss_projection
-        losses['pair_loss'] = loss_pairwise
-        losses['total_loss'] += losses['proj_loss'] + warmup_factor * losses['pair_loss']
-        if temporal:
+        losses['proj_loss'] = loss_projection * self.tube_len
+        losses['total_loss'] += losses['proj_loss']
+        if not self.config['no_pairwise_loss']: 
+            losses['pair_loss'] = loss_pairwise * self.tube_len
+            losses['total_loss'] += warmup_factor * losses['pair_loss']
+        if not self.config['no_temporal_loss']: 
             lambda_ = 0.125
-            losses['neigh_mean'] = 1./t * sum(losses[f'neigh_loss_{i}'] for i in range(t))
+            losses['neigh_mean'] = sum(losses[f'neigh_loss_{i}'] for i in range(self.tube_len)) * 1./ self.tube_len
             losses['total_loss'] += lambda_ * warmup_factor * losses['neigh_mean']
 
         return losses

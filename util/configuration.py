@@ -96,6 +96,10 @@ class Configuration():
         # # Multiprocessing parameters, not set by users
         # parser.add_argument('--local_rank', default=0, type=int, help='Local rank of this process')
 
+        # mine
+        parser.add_argument('--no_temporal_loss', action='store_true')
+        parser.add_argument('--no_pairwise_loss', action='store_true')
+
         if unknown_arg_ok:
             args, _ = parser.parse_known_args()
             self.args = vars(args)
