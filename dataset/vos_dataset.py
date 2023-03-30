@@ -82,11 +82,13 @@ class VOSDataset(Dataset):
             self.all_im_dual_transform = transforms.Compose([
                 transforms.RandomHorizontalFlip(),
                 transforms.Resize((384, 384), interpolation=InterpolationMode.BILINEAR)
+#                transforms.RandomResizedCrop((384, 384), scale=(0.36,1.00), interpolation=InterpolationMode.BILINEAR)
             ])
 
             self.all_gt_dual_transform = transforms.Compose([
                 transforms.RandomHorizontalFlip(),
                 transforms.Resize((384, 384), interpolation=InterpolationMode.BILINEAR)
+#                transforms.RandomResizedCrop((384, 384), scale=(0.36,1.00), interpolation=InterpolationMode.BILINEAR)
             ])
 
         # Final transform without randomness
@@ -205,6 +207,11 @@ class VOSDataset(Dataset):
         selector = [1 if i < info['num_objects'] else 0 for i in range(self.max_num_obj)]
         selector = torch.FloatTensor(selector)
 
+        # TODO: WARNING convert to bbox
+        # 1 x num_obj x H x W
+        first_frame_gt = mask_to_box(torch.from_numpy(first_frame_gt))
+        # END WARNING
+
         data = {
             'rgb': images,
             'first_frame_gt': first_frame_gt,
@@ -217,3 +224,31 @@ class VOSDataset(Dataset):
 
     def __len__(self):
         return len(self.videos)
+
+
+# TODO: ugly remove this move to utils?
+def mask_to_box(masks):
+    """
+        Any shape with last two dimension H x W
+        and turn into bounding box of same shape.
+    """
+    assert masks.dim() >= 3
+    sh = masks.shape
+    masks = masks.flatten(0,-3)
+
+    bounding_boxes = torch.zeros_like(masks)
+
+    for index, mask in enumerate(masks):
+        if not mask.any():
+            bounding_boxes[index] = mask
+        else:
+            y, x = torch.where(mask != 0)
+
+            x1 = torch.min(x)
+            y1 = torch.min(y)
+            x2 = torch.max(x)
+            y2 = torch.max(y)
+            bounding_boxes[index, y1:y2+1, x1:x2+1] = 1.
+
+    bounding_boxes = bounding_boxes.reshape(*sh)
+    return bounding_boxes
