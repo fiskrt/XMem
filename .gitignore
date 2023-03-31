@@ -2,6 +2,7 @@ log/
 saves
 saves/
 output/
+videos/
 .vscode/
 workspace/
 run*.sh
