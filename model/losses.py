@@ -116,7 +116,7 @@ class LossComputer:
         super().__init__()
         self.config = config
 
-        self.color_threshold = 0.3
+        self.color_threshold = self.config['pairwise_color_threshold']
         self.col_thresh_neigh = 0.01
 
         self.kernel_size_neigh = 3
@@ -126,7 +126,7 @@ class LossComputer:
         self.kernel_size = 3
         self.pairwise_dilation = 2
         self.iter = 0
-        self.warmup_iters = 10_000
+        self.warmup_iters = self.config['pairwise_warmup_steps']
 
         # TODO: set to t
         self.tube_len = 5
@@ -134,6 +134,91 @@ class LossComputer:
         self.inv_im_trans = transforms.Normalize(
             mean=[-0.485/0.229, -0.456/0.224, -0.406/0.225],
             std=[1/0.229, 1/0.224, 1/0.225])
+
+    def first_frame_gt_loss(self, data):
+        """
+            x  o  o  o  o  o  o  o  o
+            |__|__|__|
+            Here x is the first frame with gt available
+
+            TODO: can cut off logits/gt_masks to only 3 in temporal dim?
+            but maybe this is useless?
+
+            images_lab is a list of length B*t where each element is the LAB converted rgb image.
+            t here is INCLUDES the first frame! This is not the case in other loss functions.
+
+        """
+        b, t = data['rgb'].shape[:2]
+        num_objects = data['logits_1'].shape[1]-1
+        num_loss_frames = self.config['num_loss_frames']
+
+        # B * n_obj x T x H x W  (n_obj excludes bg)
+        logits = torch.stack([data[f'logits_{i}'][:,1:].flatten(0,1) for i in range(1,t)], dim=1)
+
+        # B x T=1 x n_obj x H x W
+        first_frame_gt = data['first_frame_gt'].float()
+        assert torch.bitwise_or(first_frame_gt == 1., first_frame_gt == 0.).all()
+        # B*n_obj x T=1 x H x W
+        first_frame_gt = first_frame_gt.reshape(b*num_objects, 1, *first_frame_gt.shape[-2:])
+
+        # Remove first image frame since no mask-prediction for it will be made
+        # B*T x 3 x H x W
+        images_rgb = 255.*self.inv_im_trans(data['rgb']).flatten(0,1)
+        images_lab = [torch.as_tensor(color.rgb2lab(rgb_img.byte().permute(1, 2, 0).cpu().numpy()),
+                                        device=rgb_img.device, dtype=torch.float32).permute(2, 0, 1)[None]
+                        for rgb_img in images_rgb]
+        
+        # get col sim between first frame and the i'th frame
+        lab_sims = [] 
+        for i in range(num_loss_frames):
+            # B x K^2 x H x W. The LAB similarity between frame 0 and i
+            # TODO: remove hardcoded 3,2
+            first_frame_i_lab_sim = torch.cat(
+                [get_neighbor_images_color_similarity(images_lab[ii+i+1], images_lab[0+ii], 3, 2) 
+                            for ii in range(0, len(images_lab), t)]
+            )
+
+            lab_sims.append(first_frame_i_lab_sim)
+        
+        # num_loss_frames is <= T
+        # B x num_loss_frames x K^2 x H x W  
+        lab_sims = torch.stack(lab_sims, dim=1)
+        # B*n_obj x num_loss_frames x K^2 x H x W  
+        lab_sims = lab_sims.repeat_interleave(num_objects, dim=0)
+        lab_sims = (lab_sims > 0.4).float()
+
+        # since we only use the first num_loss_frames in the loss function
+        # we truncate logits/gt aswell since they are not supervised in any way.
+        # B*n_obj x num_loss_frames x H x W
+        logits = logits[:,:num_loss_frames]
+        # B*n_obj x num_loss_frames x H x W
+        first_frame_gt = torch.cat(num_loss_frames*[first_frame_gt], dim=1)
+
+        # B*n_obj x num_loss_frames x K^2 x H x W
+        logits_unfold = unfold_patches(
+            logits, kernel_size=self.kernel_size,
+            dilation=self.pairwise_dilation,
+            remove_center=False 
+        )
+
+        # Since F.cross_ent does not broadcast we have to add dimension to first_frame_gt 
+        # B*n_obj x num_loss_frames x K^2 x H x W
+        first_frame_gt_broadcast = torch.stack(logits_unfold.shape[-3]*[first_frame_gt], dim=2)
+
+#        gt_unfold = unfold_patches(
+#            first_frame_gt, kernel_size=self.kernel_size,
+#            dilation=self.pairwise_dilation,
+#            remove_center=False 
+#        )
+
+        loss = F.binary_cross_entropy_with_logits(logits_unfold, first_frame_gt_broadcast, reduction='none')
+        #loss2 = (loss * lab_sims).mean()
+        loss3 = (loss*lab_sims).sum() / lab_sims.sum().clamp(min=1.)
+        losses = defaultdict(int)
+        losses['frame0gt_propagation_loss'] = loss3
+        losses['total_loss'] += losses['frame0gt_propagation_loss']
+        return losses
+        
     
     def knn_loss(self, data, bboxes, b, t, train_iter):
         """
@@ -159,38 +244,39 @@ class LossComputer:
         # N*T x K2-1 x H x W
        # images_lab_sim = images_lab_sim.repeat_interleave(3, dim=0).flatten(0,1)
 
-        if not self.config['no_temporal_loss']: 
-            # list of len t, B*n_obj x K^2 x H x W
-            images_lab_sim_neighs = []
-            # rand between [0, t-self.tube_len]
-            offset = random.randint(0,t-self.tube_len)
-            for i in range(self.tube_len):
-                # Add cyclic neighbors between consecutive frames ii and ii+1. frame t reconnects with frame 0. 
-                neigh_lab_sim = torch.cat(
-                    [get_neighbor_images_patch_color_similarity(images_lab[ii+i+offset], images_lab[ii+offset+(i+1)%self.tube_len], 3, 3) 
-                                for ii in range(0, len(images_lab), t)]
-                )#.unsqueeze(1)
+#        if not self.config['no_temporal_loss']: 
+        # list of len t, B*n_obj x K^2 x H x W
+        images_lab_sim_neighs = []
+        # rand between [0, t-self.tube_len]
+        offset = random.randint(0,t-self.tube_len)
+        for i in range(self.tube_len):
+            # Add cyclic neighbors between consecutive frames ii and ii+1. frame t reconnects with frame 0. 
+            neigh_lab_sim = torch.cat(
+                [get_neighbor_images_patch_color_similarity(images_lab[ii+i+offset], images_lab[ii+offset+(i+1)%self.tube_len], 3, 3) 
+                            for ii in range(0, len(images_lab), t)]
+            )#.unsqueeze(1)
 
-                # for every img/obj I want top k correspondences in other image
-                neigh_lab_sim_top = topk_mask(neigh_lab_sim, k=5)
+            # for every img/obj I want top k correspondences in other image
+            neigh_lab_sim_top = topk_mask(neigh_lab_sim, k=5)
 
-                # TODO: remove hardcoded 3
-                # B*n_obj x K2 x H x W
-                neigh_lab_sim_top = neigh_lab_sim_top.repeat_interleave(3, dim=0)
-                images_lab_sim_neighs.append(neigh_lab_sim_top)
+            # TODO: remove hardcoded 3
+            # B*n_obj x K2 x H x W
+            neigh_lab_sim_top = neigh_lab_sim_top.repeat_interleave(3, dim=0)
+            images_lab_sim_neighs.append(neigh_lab_sim_top)
 
-            # Calculate neighboring pairwise log probabilities
-            pairwise_logprob_neighbor = []
-            for i in range(self.tube_len):
-                pairwise_logprob_neighbor.append(
-                    compute_pairwise_term_neighbor(
-                        logits[:,i+offset:i+offset+1], logits[:,offset+(i+1)%self.tube_len:offset+1+(i+1)%self.tube_len],
-                        self.kernel_size_neigh, self.dilation_size_neigh 
-                    ) 
-                )
-            
-            # N x T x H x W -> N x 1 x H x W (since we sum over T dimension and keepdim)
-            bbox_time_sum = (bboxes.sum(dim=1, keepdim=True) >= 1.).float()
+        # Calculate neighboring pairwise log probabilities
+        pairwise_logprob_neighbor = []
+        for i in range(self.tube_len):
+            pairwise_logprob_neighbor.append(
+                compute_pairwise_term_neighbor(
+                    logits[:,i+offset:i+offset+1], logits[:,offset+(i+1)%self.tube_len:offset+1+(i+1)%self.tube_len],
+                    self.kernel_size_neigh, self.dilation_size_neigh 
+                ) 
+            )
+        
+        # N x T x H x W -> N x 1 x H x W (since we sum over T dimension and keepdim)
+        # TODO: only sum over tube_len and discard rest?
+        bbox_time_sum = (bboxes.sum(dim=1, keepdim=True) >= 1.).float()
 
         # Finally, compute neighbor-independent pairwise loss and projection loss
         # logits: NT x 1 x H x W
@@ -201,12 +287,12 @@ class LossComputer:
         # Calculate the time-independent pairwise and projection loss
         loss_projection = compute_project_term(logits.sigmoid(), bboxes)  
 
-        if not self.config['no_pairwise_loss']: 
-            # N * 3 x H x W -> N*T x 3 x H x W
-            pairwise_logprobs = compute_pairwise_term(logits, self.kernel_size, self.pairwise_dilation)
-        
-            weights = (images_lab_sim >= self.color_threshold).float() * bboxes.float()
-            loss_pairwise = (pairwise_logprobs * weights).sum() / weights.sum().clamp(min=1.0) 
+#        if not self.config['no_pairwise_loss']: 
+        # N * 3 x H x W -> N*T x 3 x H x W
+        pairwise_logprobs = compute_pairwise_term(logits, self.kernel_size, self.pairwise_dilation)
+    
+        weights = (images_lab_sim >= self.color_threshold).float() * bboxes.float()
+        loss_pairwise = (pairwise_logprobs * weights).sum() / weights.sum().clamp(min=1.0) 
 
         #with torch.no_grad():
         #    rows = []
@@ -251,21 +337,25 @@ class LossComputer:
 #
 
         losses = defaultdict(int)
-        if not self.config['no_temporal_loss']: 
-            # Calculate weights for neighbors, and then losses using weights.
-            for i in range(self.tube_len):
-                weight_neigh = (images_lab_sim_neighs[i] >= self.col_thresh_neigh).float() * bbox_time_sum
-                losses[f'neigh_loss_{i}'] = (pairwise_logprob_neighbor[i] * weight_neigh).sum() / weight_neigh.sum().clamp(min=1.0)
+        #if not self.config['no_temporal_loss']: 
+        # Calculate weights for neighbors, and then losses using weights.
+        for i in range(self.tube_len):
+            weight_neigh = (images_lab_sim_neighs[i] >= self.col_thresh_neigh).float() * bbox_time_sum
+            losses[f'neigh_loss_{i}'] = (pairwise_logprob_neighbor[i] * weight_neigh).sum() / weight_neigh.sum().clamp(min=1.0)
+
 
         warmup_factor = min(1., train_iter / self.warmup_iters)
-        losses['proj_loss'] = loss_projection * self.tube_len
-        losses['total_loss'] += losses['proj_loss']
+        losses['proj_loss'] = loss_projection
+        if not self.config['no_projection_loss']: 
+            losses['total_loss'] += losses['proj_loss']
+
+        losses['pair_loss'] = loss_pairwise
         if not self.config['no_pairwise_loss']: 
-            losses['pair_loss'] = loss_pairwise * self.tube_len
             losses['total_loss'] += warmup_factor * losses['pair_loss']
+
+        losses['neigh_mean'] = sum(losses[f'neigh_loss_{i}'] for i in range(self.tube_len)) * 1. / self.tube_len
         if not self.config['no_temporal_loss']: 
-            lambda_ = 0.125
-            losses['neigh_mean'] = sum(losses[f'neigh_loss_{i}'] for i in range(self.tube_len)) * 1./ self.tube_len
+            lambda_ = 0.1#25
             losses['total_loss'] += lambda_ * warmup_factor * losses['neigh_mean']
 
         return losses
@@ -286,7 +376,6 @@ class LossComputer:
             masks [0,1] are the sigmoid of logits (-inf, inf) with bg object removed
         """
         self.iter += 1
-        losses = defaultdict(int)
 
         # get batch b, and num_frames t
         b, t = data['rgb'].shape[:2]
@@ -294,6 +383,8 @@ class LossComputer:
         no = data['logits_1'][:, 1:].shape[1]
         bboxes,gt_masks = mask_to_bbox(data['cls_gt'][:, 1:], no)
         losses = self.knn_loss(data, bboxes, b, t-1, it)
+
+        #losses = self.first_frame_gt_loss(data)
 
         # calculate IoU using gt and predictions
 #        if (it%5)==0:
