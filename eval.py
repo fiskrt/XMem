@@ -16,6 +16,8 @@ from inference.inference_core import InferenceCore
 
 from progressbar import progressbar
 
+from util.bbox_utils import mask_to_box
+
 try:
     import hickle as hkl
 except ImportError:
@@ -62,6 +64,10 @@ parser.add_argument('--save_scores', action='store_true')
 parser.add_argument('--flip', action='store_true')
 parser.add_argument('--size', default=480, type=int, 
             help='Resize the shorter side to this size. -1 to use original resolution. ')
+
+
+# My args:
+parser.add_argument('--first_frame_bbox', action='store_true')
 
 args = parser.parse_args()
 config = vars(args)
@@ -201,6 +207,11 @@ for vid_reader in progressbar(meta_loader, max_value=len(meta_dataset), redirect
                 processor.set_all_labels(list(mapper.remappings.values()))
             else:
                 labels = None
+            
+            # msk has now been converted from 1xHxW where every element is in range [0, num_obj-1]
+            # to n_obj x H x W. msk is only not None in first frame of every video sequence.
+            if msk is not None and args.first_frame_bbox:
+                msk = mask_to_box(msk)
 
             # Run the model on this frame
             prob = processor.step(rgb, msk, labels, end=(ti==vid_length-1))
