@@ -126,9 +126,11 @@ for si, stage in enumerate(stages_to_perform):
     def renew_vos_loader(max_skip, finetune=False):
         # //5 because we only have annotation for every five frames
         yv_dataset = VOSDataset(path.join(yv_root, 'JPEGImages'), 
-                            path.join(yv_root, 'Annotations'), max_skip//5, is_bl=False, subset=load_sub_yv(), num_frames=config['num_frames'], finetune=finetune)
+                            path.join(yv_root, 'Annotations'), max_skip//5, is_bl=False, subset=load_sub_yv(),
+                            num_frames=config['num_frames'], finetune=finetune, first_frame_bbox=config['first_frame_bbox'])
         davis_dataset = VOSDataset(path.join(davis_root, 'JPEGImages', '480p'), 
-                            path.join(davis_root, 'Annotations', '480p'), max_skip, is_bl=False, subset=load_sub_davis(), num_frames=config['num_frames'], finetune=finetune)
+                            path.join(davis_root, 'Annotations', '480p'), max_skip, is_bl=False, subset=load_sub_davis(),
+                            num_frames=config['num_frames'], finetune=finetune, first_frame_bbox=config['first_frame_bbox'])
         #train_dataset = ConcatDataset([davis_dataset])
         train_dataset = ConcatDataset([davis_dataset]*5 + [yv_dataset])
 

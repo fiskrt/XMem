@@ -10,6 +10,7 @@ import numpy as np
 
 from dataset.range_transform import im_normalization, im_mean
 from dataset.reseed import reseed
+from util.bbox_utils import mask_to_box
 
 
 class VOSDataset(Dataset):
@@ -22,13 +23,17 @@ class VOSDataset(Dataset):
     - Apply random transform to each of the frame
     - The distance between frames is controlled
     """
-    def __init__(self, im_root, gt_root, max_jump, is_bl, subset=None, num_frames=3, max_num_obj=3, finetune=False):
+    def __init__(self, im_root, gt_root, max_jump, is_bl, subset=None, num_frames=3, max_num_obj=3, finetune=False, first_frame_bbox=False):
         self.im_root = im_root
         self.gt_root = gt_root
         self.max_jump = max_jump
         self.is_bl = is_bl
         self.num_frames = num_frames
         self.max_num_obj = max_num_obj
+
+        # Mine. If set we turn the first_frame_gt into a first_frame_bbox
+        # TODO: not implemented for static dataset/blender
+        self.first_frame_bbox = first_frame_bbox
 
         self.videos = []
         self.frames = {}
@@ -209,8 +214,8 @@ class VOSDataset(Dataset):
 
         # TODO: WARNING convert to bbox
         # 1 x num_obj x H x W
-        first_frame_gt = mask_to_box(torch.from_numpy(first_frame_gt))
-        # END WARNING
+        if self.first_frame_bbox:
+            first_frame_gt = mask_to_box(torch.from_numpy(first_frame_gt))
 
         data = {
             'rgb': images,
@@ -224,31 +229,3 @@ class VOSDataset(Dataset):
 
     def __len__(self):
         return len(self.videos)
-
-
-# TODO: ugly remove this move to utils?
-def mask_to_box(masks):
-    """
-        Any shape with last two dimension H x W
-        and turn into bounding box of same shape.
-    """
-    assert masks.dim() >= 3
-    sh = masks.shape
-    masks = masks.flatten(0,-3)
-
-    bounding_boxes = torch.zeros_like(masks)
-
-    for index, mask in enumerate(masks):
-        if not mask.any():
-            bounding_boxes[index] = mask
-        else:
-            y, x = torch.where(mask != 0)
-
-            x1 = torch.min(x)
-            y1 = torch.min(y)
-            x2 = torch.max(x)
-            y2 = torch.max(y)
-            bounding_boxes[index, y1:y2+1, x1:x2+1] = 1.
-
-    bounding_boxes = bounding_boxes.reshape(*sh)
-    return bounding_boxes

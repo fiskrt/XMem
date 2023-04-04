@@ -99,6 +99,12 @@ class Configuration():
         # mine
         parser.add_argument('--no_temporal_loss', action='store_true')
         parser.add_argument('--no_pairwise_loss', action='store_true')
+        parser.add_argument('--no_projection_loss', action='store_true')
+        parser.add_argument('--pairwise_color_threshold', help='Pairwise loss threshold', default=0.3, type=float)
+        parser.add_argument('--num_loss_frames', default=3, type=int)
+        parser.add_argument('--pairwise_warmup_steps', default=10_000, type=int)
+        parser.add_argument('--first_frame_bbox', action='store_true')
+
 
         if unknown_arg_ok:
             args, _ = parser.parse_known_args()
