@@ -122,10 +122,11 @@ class XMemTrainer:
                 if self._do_log:
                     self.integrator.add_dict(losses)
                     if self._is_train:
-                        if it % self.log_image_interval == 0 and it != 0:
+                        if (it % self.log_image_interval == 0 or it in [10,50,100]) and it != 0:
                             if self.logger is not None:
                                 images = {**data, **out}
-                                size = (384, 384)
+#                                size = (384, 384)
+                                size = (128, 128)
                                 self.logger.log_cv2('train/pairs', pool_pairs(images, size, num_filled_objects), it)
 
             if self._is_train:
