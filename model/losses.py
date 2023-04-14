@@ -351,11 +351,12 @@ class LossComputer:
 
         losses['pair_loss'] = loss_pairwise
         if not self.config['no_pairwise_loss']: 
-            losses['total_loss'] += warmup_factor * losses['pair_loss']
+            gamma_ = self.config['pairwise_loss_scale'] 
+            losses['total_loss'] += gamma_ * warmup_factor * losses['pair_loss']
 
         losses['neigh_mean'] = sum(losses[f'neigh_loss_{i}'] for i in range(self.tube_len)) * 1. / self.tube_len
         if not self.config['no_temporal_loss']: 
-            lambda_ = 0.1#25
+            lambda_ = self.config['temporal_loss_scale'] #0.1 #0.125
             losses['total_loss'] += lambda_ * warmup_factor * losses['neigh_mean']
 
         return losses
