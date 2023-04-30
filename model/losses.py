@@ -13,6 +13,8 @@ import numpy as np
 
 import random
 
+from typing import List
+
 
 def compute_pairwise_term_neighbor(mask_logits, mask_logits_neighbor, pairwise_size, pairwise_dilation):
 	# N x T x H x W
@@ -88,13 +90,14 @@ def dice_coefficient(x, target):
     #assert (target<=1.).all() and (target>=0.).all(), 'probability not in [0,1]'
     #assert ((target == 1.) | (target == 0.)).all(), 'mask not 0,1'
 
-    eps = 1e-5
+#    eps = 1e-5
+    eps = 1
     n_inst = x.size(0)
     x = x.reshape(n_inst, -1)
     target = target.reshape(n_inst, -1)
-    intersection = (x * target).sum(dim=1)
-    union = (x ** 2.0).sum(dim=1) + (target ** 2.0).sum(dim=1) + eps
-    loss = 1. - (2 * intersection / union)
+    intersection = (x * target).sum(dim=1) 
+    union = (x ** 2.0).sum(dim=1) + (target ** 2.0).sum(dim=1)
+    loss = 1. - ((2 * intersection + eps) / (union + eps))
     return loss
 
 def compute_project_term(mask_scores, gt_bitmasks):
@@ -117,10 +120,11 @@ class LossComputer:
         self.config = config
 
         self.color_threshold = self.config['pairwise_color_threshold']
-        self.col_thresh_neigh = 0.01
+        self.col_thresh_neigh = self.config['temporal_color_threshold']
 
         self.kernel_size_neigh = 3
         self.dilation_size_neigh = 3
+        self.theta_neigh = self.config['temporal_theta']
 
         # TODO: use instead of hardcoded. not used right now
         self.kernel_size = 3
@@ -164,6 +168,7 @@ class LossComputer:
         # Remove first image frame since no mask-prediction for it will be made
         # B*T x 3 x H x W
         images_rgb = 255.*self.inv_im_trans(data['rgb']).flatten(0,1)
+        # Turn rgb into L*a*b* with ranges L*: [0, 100], a*: [-127, 128] b*: [-128,127]
         images_lab = [torch.as_tensor(color.rgb2lab(rgb_img.byte().permute(1, 2, 0).cpu().numpy()),
                                         device=rgb_img.device, dtype=torch.float32).permute(2, 0, 1)[None]
                         for rgb_img in images_rgb]
@@ -227,57 +232,35 @@ class LossComputer:
             TODO: send in bboxes as B*n_obj x T x H x W
         """
         # B*n_obj x T x H x W  (n_obj excludes bg)
+        #WARNING
+        #logits = data['GT_PRED']
+        #logits.requires_grad = True
+        # END WARNING
         logits = torch.stack([data[f'logits_{i+1}'][:,1:].flatten(0,1) for i in range(t)], dim=1)
 
         # Remove first image frame since no mask-prediction for it will be made
-        images_rgb = 255.*self.inv_im_trans(data['rgb'])[:,1:].flatten(0,1) # B*T x 3 x H x W
-        images_lab = [torch.as_tensor(color.rgb2lab(rgb_img.byte().permute(1, 2, 0).cpu().numpy()),
-                                        device=rgb_img.device, dtype=torch.float32).permute(2, 0, 1)[None]
-                        for rgb_img in images_rgb]
+        images_rgb = 255.*self.inv_im_trans(data['rgb'])[:,1:] # B x T x 3 x H x W
+        images_lab = torch.stack([torch.as_tensor(color.rgb2lab(rgb_img.byte().permute(1, 2, 0).cpu().numpy()),
+                                        device=rgb_img.device, dtype=torch.float32).permute(2, 0, 1)
+                                         for rgb_img in images_rgb.flatten(0,1)]
+                    )
+
+        images_lab = images_lab.reshape(images_rgb.shape)
+
+        images_lab_sim = get_self_similarity(images_lab, b, t, num_obj=3)
+        images_lab_sim_neighs, offset = get_neighbor_similarity(
+                                                                images_lab, b, t,
+                                                                num_obj=3,
+                                                                tube_len=self.tube_len,
+                                                                theta = self.theta_neigh
+                                        )
         
-        # Self LAB similarities used for pairwise loss    B*T x K^2-1 x H x W
-        images_lab_sim = torch.cat([get_images_color_similarity(img_lab) for img_lab in images_lab])
-        # reshape into B x T x K2-1 x H x W
-        images_lab_sim = images_lab_sim.reshape(b, t, *images_lab_sim.shape[-3:]).repeat_interleave(3, dim=0).flatten(0,1)
-
-        # TODO: remove hardcoded 3, should be num_obj
-        # N*T x K2-1 x H x W
-       # images_lab_sim = images_lab_sim.repeat_interleave(3, dim=0).flatten(0,1)
-
-#        if not self.config['no_temporal_loss']: 
-        # list of len t, B*n_obj x K^2 x H x W
-        images_lab_sim_neighs = []
-        # rand between [0, t-self.tube_len]
-        offset = random.randint(0,t-self.tube_len)
-        for i in range(self.tube_len):
-            # Add cyclic neighbors between consecutive frames ii and ii+1. frame t reconnects with frame 0. 
-            neigh_lab_sim = torch.cat(
-                [get_neighbor_images_patch_color_similarity(images_lab[ii+i+offset], images_lab[ii+offset+(i+1)%self.tube_len], 3, 3) 
-                            for ii in range(0, len(images_lab), t)]
-            )#.unsqueeze(1)
-
-            # for every img/obj I want top k correspondences in other image
-            neigh_lab_sim_top = topk_mask(neigh_lab_sim, k=5)
-
-            # TODO: remove hardcoded 3
-            # B*n_obj x K2 x H x W
-            neigh_lab_sim_top = neigh_lab_sim_top.repeat_interleave(3, dim=0)
-            images_lab_sim_neighs.append(neigh_lab_sim_top)
-
-        # Calculate neighboring pairwise log probabilities
-        pairwise_logprob_neighbor = []
-        for i in range(self.tube_len):
-            pairwise_logprob_neighbor.append(
-                compute_pairwise_term_neighbor(
-                    logits[:,i+offset:i+offset+1], logits[:,offset+(i+1)%self.tube_len:offset+1+(i+1)%self.tube_len],
-                    self.kernel_size_neigh, self.dilation_size_neigh 
-                ) 
-            )
+        loss_temporal = calculate_temporal_loss(
+                            logits, bboxes, images_lab_sim_neighs,
+                            self.col_thresh_neigh, self.kernel_size_neigh,
+                            self.dilation_size_neigh, offset, self.tube_len
+                        ) 
         
-        # N x T x H x W -> N x 1 x H x W (since we sum over T dimension and keepdim)
-        # TODO: only sum over tube_len and discard rest?
-        bbox_time_sum = (bboxes.sum(dim=1, keepdim=True) >= 1.).float()
-
         # Finally, compute neighbor-independent pairwise loss and projection loss
         # logits: NT x 1 x H x W
         logits = logits.flatten(0,1)[:, None]
@@ -287,76 +270,30 @@ class LossComputer:
         # Calculate the time-independent pairwise and projection loss
         loss_projection = compute_project_term(logits.sigmoid(), bboxes)  
 
-#        if not self.config['no_pairwise_loss']: 
         # N * 3 x H x W -> N*T x 3 x H x W
         pairwise_logprobs = compute_pairwise_term(logits, self.kernel_size, self.pairwise_dilation)
     
         weights = (images_lab_sim >= self.color_threshold).float() * bboxes.float()
         loss_pairwise = (pairwise_logprobs * weights).sum() / weights.sum().clamp(min=1.0) 
 
-        #with torch.no_grad():
-        #    rows = []
-        #    for ti in range(t):
-        #        rows.append(
-        #            torch.cat([bboxes[6*ti+n,0] for n in range(6)], dim=1)
-        #        )
-        #    img = torch.cat(rows, dim=0)
-        #    cv2.imwrite(f'vis_mask_check/bboxes.png',img.repeat(3,1,1).permute(1,2,0).float().cpu().numpy() * 255)
-
-        #print('drop top rain drops')
-#        with torch.no_grad():
-#            print('saving images on!')
-#            pred_mask = data[f'masks_{1}'][0,0]
-#            # TODO: make sure these masks line up with gt and bbox, they do not RN
-#            gt_mask = data['cls_gt'][0, 1, 0]
-#            gt_box = bboxes[0,0]
-#            img = torch.cat([pred_mask, gt_mask, gt_box],dim=0)
-#            # now check the lab similarities
-#            img_lower = torch.cat([images_lab_sim[0,0], images_lab_sim_neighs[0][0,0], images_lab_sim_neighs[0][0,4]],dim=0)
-#            
-#            img = torch.cat([img, img_lower], dim=1)
-#            cv2.imwrite(f'vis_mask_check/pred_mask.png',img.repeat(3,1,1).permute(1,2,0).float().cpu().numpy() * 255)
-#
-#            # B*T x 3 x H x W
-#            img_seq_t = torch.cat([images_rgb[i] for i in range(t)],dim=1).permute(1,2,0)
-#
-#            row = []
-#            for i in range(t):
-#                # list of len t, B*n_obj x K^2 x H x W. Batch 0, obj 0, upper left pixel
-#                row.append(
-#                    torch.cat([images_lab_sim_neighs[i][n,0]>=self.col_thresh_neigh for n in range(6)],dim=1).repeat(3,1,1).permute(1,2,0)*255
-#                )
-#            img_seq_b = torch.cat(row)
-#
-#            img2 = torch.cat([img_seq_t, img_seq_b], dim=1).float().cpu().numpy()
-#
-#            cv2.imwrite(f'vis_mask_check/sequence2.png',img2)
-#
-#            img3 = torch.cat([bbox_time_sum[i] for i in range(6)],dim=1).repeat(3,1,1).permute(1,2,0).float().cpu().numpy()*255
-#            cv2.imwrite(f'vis_mask_check/bbox_time_union.png',img3)
-#
-
-        losses = defaultdict(int)
-        #if not self.config['no_temporal_loss']: 
-        # Calculate weights for neighbors, and then losses using weights.
-        for i in range(self.tube_len):
-            weight_neigh = (images_lab_sim_neighs[i] >= self.col_thresh_neigh).float() * bbox_time_sum
-            losses[f'neigh_loss_{i}'] = (pairwise_logprob_neighbor[i] * weight_neigh).sum() / weight_neigh.sum().clamp(min=1.0)
-
+        losses = defaultdict(float)
 
         warmup_factor = min(1., train_iter / self.warmup_iters)
         losses['proj_loss'] = loss_projection
         if not self.config['no_projection_loss']: 
-            losses['total_loss'] += losses['proj_loss']
+
+            alpha_ = self.config['projection_loss_scale']
+            losses['total_loss'] += alpha_ * losses['proj_loss']
 
         losses['pair_loss'] = loss_pairwise
         if not self.config['no_pairwise_loss']: 
             gamma_ = self.config['pairwise_loss_scale'] 
             losses['total_loss'] += gamma_ * warmup_factor * losses['pair_loss']
 
+        losses.update(loss_temporal)
         losses['neigh_mean'] = sum(losses[f'neigh_loss_{i}'] for i in range(self.tube_len)) * 1. / self.tube_len
         if not self.config['no_temporal_loss']: 
-            lambda_ = self.config['temporal_loss_scale'] #0.1 #0.125
+            lambda_ = self.config['temporal_loss_scale']
             losses['total_loss'] += lambda_ * warmup_factor * losses['neigh_mean']
 
         return losses
@@ -376,23 +313,117 @@ class LossComputer:
 
             masks [0,1] are the sigmoid of logits (-inf, inf) with bg object removed
         """
-        self.iter += 1
-
         # get batch b, and num_frames t
         b, t = data['rgb'].shape[:2]
-
         no = data['logits_1'][:, 1:].shape[1]
         bboxes,gt_masks = mask_to_bbox(data['cls_gt'][:, 1:], no)
+
+        #GT_PRED = gt_masks.logit(eps=1e-7)
+        #data['GT_PRED'] = GT_PRED
         losses = self.knn_loss(data, bboxes, b, t-1, it)
 
-        #losses = self.first_frame_gt_loss(data)
-
         # calculate IoU using gt and predictions
-#        if (it%5)==0:
         masks = torch.stack([data[f'masks_{i}'].flatten(0,1) for i in range(1,t)], dim=1)
         losses['IoU']=dice_coefficient(masks.flatten(0,1), gt_masks.flatten(0,1))
 
         return losses
+
+
+def get_self_similarity(images_lab, b, t, num_obj):
+    """
+        For every frame in video, create similarity map of pixels in the same frame.
+        Used in pairwise loss.
+
+        images_lab: # B x T x 3 x H x W
+
+        Return tensor: B*n_obj*T x K2-1 x H x W
+
+        TODO: fix stupid order to avoid reshape-repeat-flatten
+    """
+    assert images_lab.dim() == 5 
+    assert images_lab.shape[0] == b and images_lab.shape[1] == t and images_lab.shape[2] == 3
+
+    # get_images_color_similarity assumes that we have a batch dimension of 1
+    images_lab = images_lab.unsqueeze(2)
+    # Self LAB similarities used for pairwise loss    B*T x K^2-1 x H x W
+    images_lab_sim = torch.cat([get_images_color_similarity(img_lab) for img_lab in images_lab.flatten(0,1)])
+    # reshape into B x T x K2-1 x H x W
+    images_lab_sim = images_lab_sim.reshape(b, t, *images_lab_sim.shape[-3:])
+
+    # B*n_obj*T x K2-1 x H x W
+    return images_lab_sim.repeat_interleave(num_obj, dim=0).flatten(0,1)
+
+def calculate_temporal_loss(logits: torch.FloatTensor,
+                            bboxes: torch.FloatTensor,
+                            images_lab_sim_neighs: List[torch.FloatTensor],
+                            color_threshold: float,
+                            kernel_size: int,
+                            dilation_size: int,
+                            offset: int,
+                            tube_len: int):
+    """
+        Calculate the temporal loss between frames.
+    """
+
+    # Calculate neighboring pairwise log probabilities
+    pairwise_logprob_neighbor = []
+    for i in range(tube_len):
+        pairwise_logprob_neighbor.append(
+            compute_pairwise_term_neighbor(
+                logits[:,i+offset:i+offset+1], 
+                logits[:,offset+(i+1)%tube_len:offset+1+(i+1)%tube_len],
+                kernel_size,
+                dilation_size
+            ) 
+        )
+    
+    # N x T x H x W -> N x 1 x H x W (since we sum over T dimension and keepdim)
+    # TODO: only sum over tube_len and discard rest?
+    bbox_time_sum = (bboxes.sum(dim=1, keepdim=True) >= 1.).float()
+
+    losses = defaultdict(float)
+    for i in range(tube_len):
+        weight_neigh = (images_lab_sim_neighs[i] >= color_threshold).float() * bbox_time_sum
+        losses[f'neigh_loss_{i}'] = (pairwise_logprob_neighbor[i] * weight_neigh).sum() / weight_neigh.sum().clamp(min=1.0)
+    return losses
+
+def get_neighbor_similarity(images_lab, b, t, num_obj, tube_len, theta=0.5, topk=5):
+    """
+        Takes 'images_lab' and turns returns the similarity with neighbors.
+        Used in temporal loss.
+
+        images_lab: # B x T x 3 x H x W
+
+        Return list of length tube_len with elements B*n_obj x K2 x H x W
+    """
+    assert images_lab.dim() == 5 
+    assert images_lab.shape[0] == b and images_lab.shape[1] == t and images_lab.shape[2] == 3
+
+    images_lab = images_lab.unsqueeze(2)
+
+    images_lab_sim_neighs = []
+    offset = random.randint(0,t-tube_len) # rand between [0, t-self.tube_len]
+    for i in range(tube_len):
+        # Add similarities between consecutive frames i and i+1. frame t reconnects with frame 0. 
+        neigh_lab_sim = torch.cat([
+            get_neighbor_images_patch_color_similarity(
+                images_lab[b_i, i+offset],
+                images_lab[b_i, offset+((i+1)%tube_len)],
+                3, 3,  # TODO: dilation is never used, very fragile hardcoded and has to match in other functions
+                theta=theta
+            ) 
+            for b_i in range(b)]
+        )
+
+        # for every img/obj I want top k correspondences in other image
+        neigh_lab_sim_top = topk_mask(neigh_lab_sim, k=topk)
+
+        # B*n_obj x K2 x H x W
+        neigh_lab_sim_top = neigh_lab_sim_top.repeat_interleave(num_obj, dim=0)
+        images_lab_sim_neighs.append(neigh_lab_sim_top)
+    
+    return images_lab_sim_neighs, offset
+
 
 def unfold_patches(x, kernel_size, dilation, remove_center=True):
     assert x.dim() == 4
@@ -434,7 +465,7 @@ def get_images_color_similarity(images, kernel_size=3, dilation=2):
     return similarity 
 
 
-def get_neighbor_images_color_similarity(images, images_neighbor, kernel_size, dilation):
+def get_neighbor_images_color_similarity(images, images_neighbor, kernel_size, dilation, theta=0.5):
     """
         TODO: merge this with other image color similarity
         TODO: Take into account matching radius R?
@@ -448,11 +479,11 @@ def get_neighbor_images_color_similarity(images, images_neighbor, kernel_size, d
     )
 
     diff = images_neighbor[:, :, None] - unfolded_images
-    similarity = torch.exp(-torch.norm(diff, dim=1) * 0.5)
+    similarity = torch.exp(-torch.norm(diff, dim=1) * theta)
 
     return similarity
 
-def get_neighbor_images_patch_color_similarity(images, images_neighbor, kernel_size, dilation):
+def get_neighbor_images_patch_color_similarity(images, images_neighbor, kernel_size, dilation, theta):
     # images: 1 x C x H x W
     assert images.dim() == 4
     assert images.size(0) == 1
@@ -467,20 +498,23 @@ def get_neighbor_images_patch_color_similarity(images, images_neighbor, kernel_s
     unfolded_images = unfolded_images.flatten(1,2)
     unfolded_images_neighbor = unfolded_images_neighbor.flatten(1,2)
     
-    similarity = get_neighbor_images_color_similarity(unfolded_images, unfolded_images_neighbor, 3, 3)
-    return similarity
+    return get_neighbor_images_color_similarity(
+        unfolded_images, 
+        unfolded_images_neighbor,
+        3, 3, theta=theta
+        )
 
 def topk_mask(images_lab_sim, k):
     """
         Return images_lab_sim with everything zerod out
         except for the top k entries in dimension 1.
-        [[0.,  1.,  2.,  3.],
+        [[0.,  4.,  2.,  3.],
         [ 4.,  5.,  6.,  7.],
-        [ 8.,  9., 10., 11.]]
+        [ 28., 9., 10., 1.]]
         ----------------------->
-        [[0.,  0.,  2.,  3.],
+        [[0.,  4.,  0.,  3.],
         [ 0.,  0.,  6.,  7.],
-        [ 0.,  0., 10., 11.]]
+        [ 28.,  0., 10., 0.]]
     """
     images_lab_sim_mask = torch.zeros_like(images_lab_sim)
     topk, indices = torch.topk(images_lab_sim, k, dim=1) # 1, 3, 5, 7
