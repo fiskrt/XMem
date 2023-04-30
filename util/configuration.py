@@ -97,13 +97,28 @@ class Configuration():
         # parser.add_argument('--local_rank', default=0, type=int, help='Local rank of this process')
 
         # mine
-        parser.add_argument('--no_temporal_loss', action='store_true')
-        parser.add_argument('--no_pairwise_loss', action='store_true')
-        parser.add_argument('--no_projection_loss', action='store_true')
-        parser.add_argument('--pairwise_color_threshold', help='Pairwise loss threshold', default=0.3, type=float)
-        parser.add_argument('--num_loss_frames', default=3, type=int)
-        parser.add_argument('--pairwise_warmup_steps', default=10_000, type=int)
         parser.add_argument('--first_frame_bbox', action='store_true')
+
+        # projection loss
+        parser.add_argument('--no_projection_loss', action='store_true')
+        parser.add_argument('--projection_loss_scale', help='Projection loss scaling factor', default=1.0, type=float)
+
+        # Pairwise loss
+        parser.add_argument('--no_pairwise_loss', action='store_true')
+        parser.add_argument('--pairwise_color_threshold', help='Pairwise loss threshold', default=0.3, type=float)
+        # TODO: separate the warmups between pairwise and temporal?
+        parser.add_argument('--pairwise_warmup_steps', default=10_000, type=int)
+        parser.add_argument('--pairwise_loss_scale', help='Pairwise loss scaling factor', default=1.0, type=float)
+
+        # temporal loss
+        parser.add_argument('--no_temporal_loss', action='store_true')
+        parser.add_argument('--temporal_loss_scale', help='Temporal loss scaling factor', default=0.1, type=float)
+        parser.add_argument('--temporal_color_threshold', help='Temporal loss threshold', default=0.05, type=float)
+        parser.add_argument('--temporal_theta', help='Exponential similarity constant', default=0.5, type=float)
+
+
+        # First frame gt supervised propagation loss
+        parser.add_argument('--num_loss_frames', default=3, type=int)
 
 
         if unknown_arg_ok:
