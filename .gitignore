@@ -10,6 +10,7 @@ run*.sh
 #my
 vis_mask_check/
 results/
+saves_models
 
 # videos
 *.avi

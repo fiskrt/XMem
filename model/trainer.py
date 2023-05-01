@@ -18,7 +18,8 @@ from util.image_saver import pool_pairs
 
 
 class XMemTrainer:
-    def __init__(self, config, logger=None, save_path=None, local_rank=0, world_size=1):
+    def __init__(self, config, *, logger=None, save_path=None, 
+                    save_path_model=None, local_rank=0, world_size=1):
         self.config = config
         self.num_frames = config['num_frames']
         self.num_ref_frames = config['num_ref_frames']
@@ -32,6 +33,10 @@ class XMemTrainer:
         # Set up logger when local_rank=0
         self.logger = logger
         self.save_path = save_path
+        self.save_path_model = save_path_model
+        if save_path is None:
+            self.save_path_model = None
+
         if logger is not None:
             self.last_time = time.time()
             self.logger.log_string('model_size', str(sum([param.nelement() for param in self.XMem.parameters()])))
@@ -159,22 +164,22 @@ class XMemTrainer:
         self.scheduler.step()
 
     def save_network(self, it):
-        if self.save_path is None:
+        if self.save_path_model is None:
             print('Saving has been disabled.')
             return
         
-        os.makedirs(os.path.dirname(self.save_path), exist_ok=True)
-        model_path = f'{self.save_path}_{it}.pth'
+        os.makedirs(os.path.dirname(self.save_path_model), exist_ok=True)
+        model_path = f'{self.save_path_model}_{it}.pth'
         torch.save(self.XMem.module.state_dict(), model_path)
         print(f'Network saved to {model_path}.')
 
     def save_checkpoint(self, it):
-        if self.save_path is None:
+        if self.save_path_model is None:
             print('Saving has been disabled.')
             return
 
-        os.makedirs(os.path.dirname(self.save_path), exist_ok=True)
-        checkpoint_path = f'{self.save_path}_checkpoint_{it}.pth'
+        os.makedirs(os.path.dirname(self.save_path_model), exist_ok=True)
+        checkpoint_path = f'{self.save_path_model}_checkpoint_{it}.pth'
         checkpoint = { 
             'it': it,
             'network': self.XMem.module.state_dict(),
