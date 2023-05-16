@@ -17,6 +17,11 @@ from typing import List
 
 
 def compute_pairwise_term_neighbor(mask_logits, mask_logits_neighbor, pairwise_size, pairwise_dilation):
+    """
+        The probability is 1 when the both pixels are either both 0 or both 1.
+        
+        We return the -log(prob) which has range [0, inf]
+    """
 	# N x T x H x W
     assert mask_logits.dim() == 4
 
@@ -232,10 +237,6 @@ class LossComputer:
             TODO: send in bboxes as B*n_obj x T x H x W
         """
         # B*n_obj x T x H x W  (n_obj excludes bg)
-        #WARNING
-        #logits = data['GT_PRED']
-        #logits.requires_grad = True
-        # END WARNING
         logits = torch.stack([data[f'logits_{i+1}'][:,1:].flatten(0,1) for i in range(t)], dim=1)
 
         # Remove first image frame since no mask-prediction for it will be made
@@ -281,20 +282,22 @@ class LossComputer:
         warmup_factor = min(1., train_iter / self.warmup_iters)
         losses['proj_loss'] = loss_projection
         if not self.config['no_projection_loss']: 
-
             alpha_ = self.config['projection_loss_scale']
-            losses['total_loss'] += alpha_ * losses['proj_loss']
+            losses['proj_loss_scaled'] = alpha_ * losses['proj_loss']
+            losses['total_loss'] += losses['proj_loss_scaled']
 
         losses['pair_loss'] = loss_pairwise
         if not self.config['no_pairwise_loss']: 
             gamma_ = self.config['pairwise_loss_scale'] 
-            losses['total_loss'] += gamma_ * warmup_factor * losses['pair_loss']
+            losses['pair_loss_scaled'] = gamma_ * warmup_factor * losses['pair_loss']
+            losses['total_loss'] += losses['pair_loss_scaled']
 
         losses.update(loss_temporal)
         losses['neigh_mean'] = sum(losses[f'neigh_loss_{i}'] for i in range(self.tube_len)) * 1. / self.tube_len
         if not self.config['no_temporal_loss']: 
             lambda_ = self.config['temporal_loss_scale']
-            losses['total_loss'] += lambda_ * warmup_factor * losses['neigh_mean']
+            losses['neigh_mean_scaled'] = lambda_ * warmup_factor * losses['neigh_mean']
+            losses['total_loss'] += losses['neigh_mean_scaled']
 
         return losses
 
@@ -353,9 +356,9 @@ def get_self_similarity(images_lab, b, t, num_obj):
     # B*n_obj*T x K2-1 x H x W
     return images_lab_sim.repeat_interleave(num_obj, dim=0).flatten(0,1)
 
-def calculate_temporal_loss(logits: torch.FloatTensor,
-                            bboxes: torch.FloatTensor,
-                            images_lab_sim_neighs: List[torch.FloatTensor],
+def calculate_temporal_loss(logits: torch.FloatTensor, # B*n_obj x T x H x W
+                            bboxes: torch.FloatTensor, # B*n_obj x T x H x W
+                            images_lab_sim_neighs: List[torch.FloatTensor], # [i] = B*n_obj x K2 x H x W 
                             color_threshold: float,
                             kernel_size: int,
                             dilation_size: int,
@@ -461,7 +464,7 @@ def get_images_color_similarity(images, kernel_size=3, dilation=2):
 
     diff = images[:, :, None] - unfolded_images
     similarity = torch.exp(-torch.norm(diff, dim=1) * 0.5)
-
+    # This uses the Frobenius norm
     return similarity 
 
 
