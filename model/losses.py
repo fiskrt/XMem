@@ -90,7 +90,17 @@ def compute_pairwise_term(mask_logits, pairwise_size=3, pairwise_dilation=2):
     # loss = -log(prob)
     return -log_same_prob[:, 0]
 
-def dice_coefficient(x, target):
+def dice_coefficient(x: torch.tensor, target: torch.tensor):
+    """
+        x, target any shape D1 x D2 x ...  
+        returns tensor of shape D1
+        dice = 1 - (2*TP+eps)/(2*TP+FP+FN+eps)
+
+        But usually the shape is: 
+        x=target: N x 1 x 1 x (W or H)
+        where N = B*n_obj*T and last dim is either width or height
+        depending on which projection is called
+    """
     #assert (x<=1.).all() and (x>=0.).all(), 'probability not in [0,1]'
     #assert (target<=1.).all() and (target>=0.).all(), 'probability not in [0,1]'
     #assert ((target == 1.) | (target == 0.)).all(), 'mask not 0,1'
@@ -106,8 +116,12 @@ def dice_coefficient(x, target):
     return loss
 
 def compute_project_term(mask_scores, gt_bitmasks):
+    """
+    # mask_scores: B*n_obj(*T) x 1 x H x W
+    # gt_bitmasks: B*n_obj(*T) x 1 x H x W
     # mask_scores [0,1] , gt_bitmasks = {0,1}
-    # B*n_obj x 1 x H x W
+
+    """
     mask_losses_y = dice_coefficient(
         mask_scores.max(dim=2, keepdim=True)[0],
         gt_bitmasks.max(dim=2, keepdim=True)[0]
@@ -256,17 +270,34 @@ class LossComputer:
                                                                 theta = self.theta_neigh
                                         )
         
-        loss_temporal = calculate_temporal_loss(
-                            logits, bboxes, images_lab_sim_neighs,
-                            self.col_thresh_neigh, self.kernel_size_neigh,
-                            self.dilation_size_neigh, offset, self.tube_len
-                        ) 
-        
+        params = [logits, bboxes, images_lab_sim_neighs,
+                    self.col_thresh_neigh, self.kernel_size_neigh,
+                    self.dilation_size_neigh, offset, self.tube_len
+        ]
+
+        if self.config['detach_temporal_loss']:
+            loss_temporal1 = calculate_temporal_loss(*params, detach=1) 
+            loss_temporal2 = calculate_temporal_loss(*params, detach=2) 
+            loss_temporal = {k:0.5*(loss_temporal1[k] + loss_temporal2[k]) for k in loss_temporal1}
+        else:
+            loss_temporal = calculate_temporal_loss(*params) 
+
+
         # Finally, compute neighbor-independent pairwise loss and projection loss
         # logits: NT x 1 x H x W
         logits = logits.flatten(0,1)[:, None]
         # first (n_obj+B) pictures are batch 1: obj 1 obj 2 obj n batch 2: obj 1 obj 2 obj n 
         bboxes = bboxes.flatten(0,1)[:, None]
+
+        losses = defaultdict(float)
+
+        ratio = (logits.sigmoid()*bboxes).sum() / bboxes.sum().clamp(min=1.0)
+        losses['ratio'] = ratio
+        ratio_threshold = self.config['ratio_loss_threshold']
+        losses['total_loss'] += max(0., ratio_threshold-ratio) # when 0<ratio<0.2, the  
+
+        if ratio < 0.2:
+            print(f'ratio is {ratio} at iteration {train_iter}')
 
         # Calculate the time-independent pairwise and projection loss
         loss_projection = compute_project_term(logits.sigmoid(), bboxes)  
@@ -277,7 +308,6 @@ class LossComputer:
         weights = (images_lab_sim >= self.color_threshold).float() * bboxes.float()
         loss_pairwise = (pairwise_logprobs * weights).sum() / weights.sum().clamp(min=1.0) 
 
-        losses = defaultdict(float)
 
         warmup_factor = min(1., train_iter / self.warmup_iters)
         losses['proj_loss'] = loss_projection
@@ -363,7 +393,8 @@ def calculate_temporal_loss(logits: torch.FloatTensor, # B*n_obj x T x H x W
                             kernel_size: int,
                             dilation_size: int,
                             offset: int,
-                            tube_len: int):
+                            tube_len: int,
+                            detach: int=-1):
     """
         Calculate the temporal loss between frames.
     """
@@ -371,10 +402,17 @@ def calculate_temporal_loss(logits: torch.FloatTensor, # B*n_obj x T x H x W
     # Calculate neighboring pairwise log probabilities
     pairwise_logprob_neighbor = []
     for i in range(tube_len):
+        pred1 = logits[:,i+offset:i+offset+1]
+        pred2 = logits[:,offset+(i+1)%tube_len:offset+1+(i+1)%tube_len]
+        if detach == 1:
+            pred1 = pred1.detach()
+        elif detach == 2:
+            pred2 = pred2.detach()
+
         pairwise_logprob_neighbor.append(
             compute_pairwise_term_neighbor(
-                logits[:,i+offset:i+offset+1], 
-                logits[:,offset+(i+1)%tube_len:offset+1+(i+1)%tube_len],
+                pred1, 
+                pred2,
                 kernel_size,
                 dilation_size
             ) 

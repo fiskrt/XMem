@@ -88,8 +88,8 @@ class Configuration():
         # Logging information
         parser.add_argument('--log_text_interval', default=100, type=int)
         parser.add_argument('--log_image_interval', default=1000, type=int)
-        parser.add_argument('--save_network_interval', default=25000, type=int)
-        parser.add_argument('--save_checkpoint_interval', default=50000, type=int)
+        parser.add_argument('--save_network_interval', default=50000, type=int)
+        parser.add_argument('--save_checkpoint_interval', default=100000, type=int)
         parser.add_argument('--exp_id', help='Experiment UNIQUE id, use NULL to disable logging to tensorboard', default='NULL')
         parser.add_argument('--debug', help='Debug mode which logs information more often', action='store_true')
 
@@ -101,7 +101,7 @@ class Configuration():
 
         # projection loss
         parser.add_argument('--no_projection_loss', action='store_true')
-        parser.add_argument('--projection_loss_scale', help='Projection loss scaling factor', default=1.0, type=float)
+        parser.add_argument('--projection_loss_scale', help='Projection loss scaling factor', default=4.0, type=float)
 
         # Pairwise loss
         parser.add_argument('--no_pairwise_loss', action='store_true')
@@ -115,6 +115,10 @@ class Configuration():
         parser.add_argument('--temporal_loss_scale', help='Temporal loss scaling factor', default=0.1, type=float)
         parser.add_argument('--temporal_color_threshold', help='Temporal loss threshold', default=0.05, type=float)
         parser.add_argument('--temporal_theta', help='Exponential similarity constant', default=0.5, type=float)
+        parser.add_argument('--detach_temporal_loss', action='store_true')
+
+        # Ratio loss 
+        parser.add_argument('--ratio_loss_threshold', help='Ratio loss kick-in threshold', default=0.2, type=float)
 
 
         # First frame gt supervised propagation loss
