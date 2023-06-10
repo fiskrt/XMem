@@ -90,7 +90,7 @@ def compute_pairwise_term(mask_logits, pairwise_size=3, pairwise_dilation=2):
     # loss = -log(prob)
     return -log_same_prob[:, 0]
 
-def dice_coefficient(x: torch.tensor, target: torch.tensor):
+def dice_coefficient(x: torch.tensor, target: torch.tensor, numerator_eps=True):
     """
         x, target any shape D1 x D2 x ...  
         returns tensor of shape D1
@@ -106,16 +106,18 @@ def dice_coefficient(x: torch.tensor, target: torch.tensor):
     #assert ((target == 1.) | (target == 0.)).all(), 'mask not 0,1'
 
 #    eps = 1e-5
-    eps = 1
+    eps_den = 1.
+    eps_num = eps_den if numerator_eps else 0.
+
     n_inst = x.size(0)
     x = x.reshape(n_inst, -1)
     target = target.reshape(n_inst, -1)
     intersection = (x * target).sum(dim=1) 
     union = (x ** 2.0).sum(dim=1) + (target ** 2.0).sum(dim=1)
-    loss = 1. - ((2 * intersection + eps) / (union + eps))
+    loss = 1. - ((2 * intersection + eps_num) / (union + eps_den))
     return loss
 
-def compute_project_term(mask_scores, gt_bitmasks):
+def compute_project_term(mask_scores, gt_bitmasks, numerator_eps=True):
     """
     # mask_scores: B*n_obj(*T) x 1 x H x W
     # gt_bitmasks: B*n_obj(*T) x 1 x H x W
@@ -124,11 +126,13 @@ def compute_project_term(mask_scores, gt_bitmasks):
     """
     mask_losses_y = dice_coefficient(
         mask_scores.max(dim=2, keepdim=True)[0],
-        gt_bitmasks.max(dim=2, keepdim=True)[0]
+        gt_bitmasks.max(dim=2, keepdim=True)[0],
+        numerator_eps=numerator_eps
     )
     mask_losses_x = dice_coefficient(
         mask_scores.max(dim=3, keepdim=True)[0],
-        gt_bitmasks.max(dim=3, keepdim=True)[0]
+        gt_bitmasks.max(dim=3, keepdim=True)[0],
+        numerator_eps=numerator_eps
     )
     return (mask_losses_x + mask_losses_y).mean()
 
@@ -294,13 +298,17 @@ class LossComputer:
         ratio = (logits.sigmoid()*bboxes).sum() / bboxes.sum().clamp(min=1.0)
         losses['ratio'] = ratio
         ratio_threshold = self.config['ratio_loss_threshold']
-        losses['total_loss'] += max(0., ratio_threshold-ratio) # when 0<ratio<0.2, the  
+        if self.config['use_ratio_loss']:
+            losses['total_loss'] += max(0., ratio_threshold-ratio) # when 0<ratio<0.2, the  
 
-        if ratio < 0.2:
-            print(f'ratio is {ratio} at iteration {train_iter}')
+#        if ratio < 0.2:
+#            print(f'ratio is {ratio} at iteration {train_iter}')
 
         # Calculate the time-independent pairwise and projection loss
-        loss_projection = compute_project_term(logits.sigmoid(), bboxes)  
+        loss_projection = compute_project_term(logits.sigmoid(),
+                                                bboxes,
+                                                numerator_eps=self.config['dice_numerator_smoothing']
+                        )
 
         # N * 3 x H x W -> N*T x 3 x H x W
         pairwise_logprobs = compute_pairwise_term(logits, self.kernel_size, self.pairwise_dilation)

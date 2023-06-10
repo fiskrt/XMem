@@ -89,7 +89,7 @@ class Configuration():
         parser.add_argument('--log_text_interval', default=100, type=int)
         parser.add_argument('--log_image_interval', default=1000, type=int)
         parser.add_argument('--save_network_interval', default=50000, type=int)
-        parser.add_argument('--save_checkpoint_interval', default=100000, type=int)
+        parser.add_argument('--save_checkpoint_interval', default=200000, type=int)
         parser.add_argument('--exp_id', help='Experiment UNIQUE id, use NULL to disable logging to tensorboard', default='NULL')
         parser.add_argument('--debug', help='Debug mode which logs information more often', action='store_true')
 
@@ -102,6 +102,7 @@ class Configuration():
         # projection loss
         parser.add_argument('--no_projection_loss', action='store_true')
         parser.add_argument('--projection_loss_scale', help='Projection loss scaling factor', default=4.0, type=float)
+        parser.add_argument('--dice_numerator_smoothing', action='store_true')
 
         # Pairwise loss
         parser.add_argument('--no_pairwise_loss', action='store_true')
@@ -119,6 +120,7 @@ class Configuration():
 
         # Ratio loss 
         parser.add_argument('--ratio_loss_threshold', help='Ratio loss kick-in threshold', default=0.2, type=float)
+        parser.add_argument('--use_ratio_loss', action='store_true')
 
 
         # First frame gt supervised propagation loss
