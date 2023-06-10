@@ -1,9 +1,12 @@
-torchrun --nproc_per_node=2 \
+num_nodes=4
+batch_size=8
+
+torchrun --nproc_per_node=$num_nodes \
 		--master_port $(shuf -i 22000-26000 -n 1) \
 	train.py \
 	--exp_id NAME_OF_EXPERIMENT_$SLURM_JOB_ID \
 	--stage 3 \
-	--s3_batch_size 2 \
+	--s3_batch_size $batch_size \
 	--s3_lr 1e-5 \
 	--s3_iterations 100000 \
 	--num_workers 2 \
