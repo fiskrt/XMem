@@ -3,6 +3,7 @@ saves
 saves/
 output/
 videos/
+images/
 .vscode/
 workspace/
 run*.sh

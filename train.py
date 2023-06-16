@@ -81,7 +81,7 @@ for si, stage in enumerate(stages_to_perform):
         else:
             long_id = None
         logger = TensorboardLogger(config['exp_id'], long_id, git_info)
-        logger.log_string('hyperpara', str(config))
+        logger.log_string('hyperparams', str(config))
 
         # Construct the rank 0 model
         model = XMemTrainer(config, logger=logger, 
@@ -239,7 +239,7 @@ for si, stage in enumerate(stages_to_perform):
                 if config['finetune'] > 0 and not finetuning and total_iter >= config['iterations']:
                     train_sampler, train_loader = renew_loader(cur_skip, finetune=True)
                     finetuning = True
-                    model.save_network_interval = 1000
+                    model.save_network_interval = 10_000
                     break
 
                 model.do_pass(data, total_iter)

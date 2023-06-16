@@ -116,6 +116,7 @@ class Configuration():
         parser.add_argument('--temporal_loss_scale', help='Temporal loss scaling factor', default=0.1, type=float)
         parser.add_argument('--temporal_color_threshold', help='Temporal loss threshold', default=0.05, type=float)
         parser.add_argument('--temporal_theta', help='Exponential similarity constant', default=0.5, type=float)
+        parser.add_argument('--temporal_search_size', help='Neighbor search kernel size', default=3, type=int)
         parser.add_argument('--detach_temporal_loss', action='store_true')
 
         # Ratio loss 

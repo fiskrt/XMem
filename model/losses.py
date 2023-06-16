@@ -87,6 +87,8 @@ def compute_pairwise_term(mask_logits, pairwise_size=3, pairwise_dilation=2):
         torch.exp(log_same_bg_prob - max_)
     ) + max_
 
+    #assert torch.isclose(-log_same_prob[:,0],-torch.logaddexp(log_same_fg_prob, log_same_bg_prob)[:,0]).all()
+
     # loss = -log(prob)
     return -log_same_prob[:, 0]
 
@@ -147,6 +149,8 @@ class LossComputer:
 
         self.kernel_size_neigh = 3
         self.dilation_size_neigh = 3
+        self.search_size_neigh = self.config['temporal_search_size'] 
+        self.search_dilation_neigh = self.kernel_size_neigh 
         self.theta_neigh = self.config['temporal_theta']
 
         # TODO: use instead of hardcoded. not used right now
@@ -268,15 +272,17 @@ class LossComputer:
 
         images_lab_sim = get_self_similarity(images_lab, b, t, num_obj=3)
         images_lab_sim_neighs, offset = get_neighbor_similarity(
-                                                                images_lab, b, t,
-                                                                num_obj=3,
-                                                                tube_len=self.tube_len,
-                                                                theta = self.theta_neigh
+                                            images_lab, b, t,
+                                            num_obj=3,
+                                            tube_len=self.tube_len,
+                                            patch_size=self.kernel_size_neigh,
+                                            search_size=self.search_size_neigh,
+                                            theta = self.theta_neigh
                                         )
         
         params = [logits, bboxes, images_lab_sim_neighs,
-                    self.col_thresh_neigh, self.kernel_size_neigh,
-                    self.dilation_size_neigh, offset, self.tube_len
+                    self.col_thresh_neigh, self.search_size_neigh,
+                    self.search_dilation_neigh, offset, self.tube_len
         ]
 
         if self.config['detach_temporal_loss']:
@@ -297,8 +303,8 @@ class LossComputer:
 
         ratio = (logits.sigmoid()*bboxes).sum() / bboxes.sum().clamp(min=1.0)
         losses['ratio'] = ratio
-        ratio_threshold = self.config['ratio_loss_threshold']
         if self.config['use_ratio_loss']:
+            ratio_threshold = self.config['ratio_loss_threshold']
             losses['total_loss'] += max(0., ratio_threshold-ratio) # when 0<ratio<0.2, the  
 
 #        if ratio < 0.2:
@@ -436,7 +442,7 @@ def calculate_temporal_loss(logits: torch.FloatTensor, # B*n_obj x T x H x W
         losses[f'neigh_loss_{i}'] = (pairwise_logprob_neighbor[i] * weight_neigh).sum() / weight_neigh.sum().clamp(min=1.0)
     return losses
 
-def get_neighbor_similarity(images_lab, b, t, num_obj, tube_len, theta=0.5, topk=5):
+def get_neighbor_similarity(images_lab, b, t, num_obj, tube_len, *, patch_size, search_size, theta=0.5, topk=5):
     """
         Takes 'images_lab' and turns returns the similarity with neighbors.
         Used in temporal loss.
@@ -458,7 +464,8 @@ def get_neighbor_similarity(images_lab, b, t, num_obj, tube_len, theta=0.5, topk
             get_neighbor_images_patch_color_similarity(
                 images_lab[b_i, i+offset],
                 images_lab[b_i, offset+((i+1)%tube_len)],
-                3, 3,  # TODO: dilation is never used, very fragile hardcoded and has to match in other functions
+                kernel_size=patch_size,
+                search_size=search_size,
                 theta=theta
             ) 
             for b_i in range(b)]
@@ -532,12 +539,15 @@ def get_neighbor_images_color_similarity(images, images_neighbor, kernel_size, d
 
     return similarity
 
-def get_neighbor_images_patch_color_similarity(images, images_neighbor, kernel_size, dilation, theta):
+def get_neighbor_images_patch_color_similarity(images, images_neighbor,*, kernel_size, search_size, theta):
+    """
+        Unfold patches and search window.
+    """
     # images: 1 x C x H x W
     assert images.dim() == 4
     assert images.size(0) == 1
 
-    # TODO: why dilation=1 here, and also why always 3,3 below?
+    # dilation=1 such that patches are contiguous 
     unfolded_images = unfold_patches(
         images, kernel_size=kernel_size, dilation=1, remove_center=False
     )
@@ -550,7 +560,9 @@ def get_neighbor_images_patch_color_similarity(images, images_neighbor, kernel_s
     return get_neighbor_images_color_similarity(
         unfolded_images, 
         unfolded_images_neighbor,
-        3, 3, theta=theta
+        kernel_size=search_size, # Kernel size of search window
+        dilation=kernel_size, # Dilation set to patch size to prevent overlap
+        theta=theta
         )
 
 def topk_mask(images_lab_sim, k):
