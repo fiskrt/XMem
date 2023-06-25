@@ -7,7 +7,7 @@ import torchvision.transforms as transforms
 
 from collections import defaultdict
 
-from skimage import color
+import kornia.color as kol
 import cv2
 import numpy as np
 
@@ -262,11 +262,8 @@ class LossComputer:
         logits = torch.stack([data[f'logits_{i+1}'][:,1:].flatten(0,1) for i in range(t)], dim=1)
 
         # Remove first image frame since no mask-prediction for it will be made
-        images_rgb = 255.*self.inv_im_trans(data['rgb'])[:,1:] # B x T x 3 x H x W
-        images_lab = torch.stack([torch.as_tensor(color.rgb2lab(rgb_img.byte().permute(1, 2, 0).cpu().numpy()),
-                                        device=rgb_img.device, dtype=torch.float32).permute(2, 0, 1)
-                                         for rgb_img in images_rgb.flatten(0,1)]
-                    )
+        images_rgb = self.inv_im_trans(data['rgb'])[:,1:] # B x T x 3 x H x W
+        images_lab = kol.rgb_to_lab(images_rgb.flatten(0,1)).reshape(images_rgb.shape)
 
         images_lab = images_lab.reshape(images_rgb.shape)
 
