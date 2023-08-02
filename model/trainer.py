@@ -12,7 +12,6 @@ import torch.nn as nn
 import torch.optim as optim
 
 from model.network import XMem
-from model.losses import LossComputer
 from util.log_integrator import Integrator
 from util.image_saver import pool_pairs
 
@@ -25,6 +24,12 @@ class XMemTrainer:
         self.num_ref_frames = config['num_ref_frames']
         self.deep_update_prob = config['deep_update_prob']
         self.local_rank = local_rank
+
+        if self.config['original_loss']:
+            from model.losses_original import LossComputer
+            print('[!] WARNING: Using ORIGINAL LOSS')
+        else:
+            from model.losses import LossComputer
 
         self.XMem = nn.parallel.DistributedDataParallel(
             XMem(config).cuda(), 
