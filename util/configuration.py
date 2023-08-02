@@ -16,6 +16,7 @@ class Configuration():
         parser.add_argument('--static_root', help='Static training data root', default='../static')
         parser.add_argument('--bl_root', help='Blender training data root', default='../BL30K')
         parser.add_argument('--yv_root', help='YouTubeVOS data root', default='../YouTube')
+        parser.add_argument('--mose_root', help='MOSE data root', default='../Mose')
         parser.add_argument('--davis_root', help='DAVIS data root', default='../DAVIS')
         parser.add_argument('--num_workers', help='Total number of dataloader workers across all GPUs processes', type=int, default=16)
 
@@ -98,6 +99,13 @@ class Configuration():
 
         # mine
         parser.add_argument('--first_frame_bbox', action='store_true')
+        parser.add_argument('--original_loss', action='store_true')
+        parser.add_argument('--train_on_mose', action='store_true')
+        parser.add_argument('--train_force_first_frame', action='store_true')
+        parser.add_argument('--train_with_first_frame', action='store_true')
+        parser.add_argument('--train_with_two_frames', action='store_true')
+        
+
 
         # projection loss
         parser.add_argument('--no_projection_loss', action='store_true')
