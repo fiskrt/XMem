@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 import numpy as np
 from PIL import Image
 
-from inference.data.test_datasets import LongTestDataset, DAVISTestDataset, YouTubeVOSTestDataset
+from inference.data.test_datasets import LongTestDataset, DAVISTestDataset, YouTubeVOSTestDataset, MOSETestDataset
 from inference.data.mask_mapper import MaskMapper
 from model.network import XMem
 from inference.inference_core import InferenceCore
@@ -34,12 +34,13 @@ parser.add_argument('--model', default='./saves/XMem.pth')
 parser.add_argument('--d16_path', default='../DAVIS/2016')
 parser.add_argument('--d17_path', default='../DAVIS/2017')
 parser.add_argument('--y18_path', default='../YouTube2018')
+parser.add_argument('--mose_path', default='../Mose')
 parser.add_argument('--y19_path', default='../YouTube')
 parser.add_argument('--lv_path', default='../long_video_set')
 # For generic (G) evaluation, point to a folder that contains "JPEGImages" and "Annotations"
 parser.add_argument('--generic_path')
 
-parser.add_argument('--dataset', help='D16/D17/Y18/Y19/LV1/LV3/G', default='D17')
+parser.add_argument('--dataset', help='D16/D17/Y18/Y19/LV1/LV3/G/MOSE', default='D17')
 parser.add_argument('--split', help='val/test', default='val')
 parser.add_argument('--output', default=None)
 parser.add_argument('--save_all', action='store_true', 
@@ -81,10 +82,11 @@ if args.output is None:
 Data preparation
 """
 is_youtube = args.dataset.startswith('Y')
+is_mose = args.dataset.startswith('M')
 is_davis = args.dataset.startswith('D')
 is_lv = args.dataset.startswith('LV')
 
-if is_youtube or args.save_scores:
+if is_youtube or is_mose or args.save_scores:
     out_path = path.join(args.output, 'Annotations')
 else:
     out_path = args.output
@@ -102,7 +104,12 @@ if is_youtube:
         meta_dataset = YouTubeVOSTestDataset(data_root=yv_path, split='test', size=args.size)
     else:
         raise NotImplementedError
-
+elif is_mose:
+    if args.split == 'val':
+        args.split = 'valid'
+        meta_dataset = MOSETestDataset(data_root=args.mose_path, split='valid', size=args.size)
+    else:
+        raise NotImplementedError
 elif is_davis:
     if args.dataset == 'D16':
         if args.split == 'val':
@@ -212,9 +219,14 @@ for vid_reader in progressbar(meta_loader, max_value=len(meta_dataset), redirect
             # to n_obj x H x W. msk is only not None in first frame of every video sequence.
             if msk is not None and args.first_frame_bbox:
                 msk = mask_to_box(msk)
-
-            # Run the model on this frame
-            prob = processor.step(rgb, msk, labels, end=(ti==vid_length-1))
+                
+                # In case of box init, we take two steps to produce a mask for the
+                # reference frame aswell. 
+                processor.step(rgb, msk, labels, end=False)
+                prob = processor.step(rgb, None, None, end=(ti==vid_length-1))
+            else:
+                # Run the model on this frame
+                prob = processor.step(rgb, msk, labels, end=(ti==vid_length-1))
 
             # Upsample to original size if needed
             if need_resize:
@@ -263,6 +275,14 @@ if not args.save_scores:
     if is_youtube:
         print('Making zip for YouTubeVOS...')
         shutil.make_archive(path.join(args.output, path.basename(args.output)), 'zip', args.output, 'Annotations')
+    elif is_mose:
+        print('Making zip for MOSE...')
+        shutil.make_archive(
+                    base_name=path.join(args.output, path.basename(args.output)),
+                    format='zip',
+                    root_dir=args.output+'/Annotations',
+                    base_dir='./'
+        )
     elif is_davis and args.split == 'test':
         print('Making zip for DAVIS test-dev...')
         shutil.make_archive(args.output, 'zip', args.output)
