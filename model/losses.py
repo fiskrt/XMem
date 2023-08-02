@@ -161,96 +161,21 @@ class LossComputer:
 
         # TODO: set to t
         self.tube_len = 5
+        if self.tube_len >= self.config['num_frames']:
+            print('[!] Warning tube_len>=num_frames, so setting tube_len=num_frames-1')
+            self.tube_len = self.config['num_frames'] - 1
+            print(f'Tube length is {self.tube_len}')
+        
+        if self.config['single_object']:
+            self.num_obj = 1
+        else:
+            self.num_obj = 3
+        print(f'[!] Set number of objects in losses.py to {self.num_obj}')
 
         self.inv_im_trans = transforms.Normalize(
             mean=[-0.485/0.229, -0.456/0.224, -0.406/0.225],
             std=[1/0.229, 1/0.224, 1/0.225])
 
-    def first_frame_gt_loss(self, data):
-        """
-            x  o  o  o  o  o  o  o  o
-            |__|__|__|
-            Here x is the first frame with gt available
-
-            TODO: can cut off logits/gt_masks to only 3 in temporal dim?
-            but maybe this is useless?
-
-            images_lab is a list of length B*t where each element is the LAB converted rgb image.
-            t here is INCLUDES the first frame! This is not the case in other loss functions.
-
-        """
-        b, t = data['rgb'].shape[:2]
-        num_objects = data['logits_1'].shape[1]-1
-        num_loss_frames = self.config['num_loss_frames']
-
-        # B * n_obj x T x H x W  (n_obj excludes bg)
-        logits = torch.stack([data[f'logits_{i}'][:,1:].flatten(0,1) for i in range(1,t)], dim=1)
-
-        # B x T=1 x n_obj x H x W
-        first_frame_gt = data['first_frame_gt'].float()
-        assert torch.bitwise_or(first_frame_gt == 1., first_frame_gt == 0.).all()
-        # B*n_obj x T=1 x H x W
-        first_frame_gt = first_frame_gt.reshape(b*num_objects, 1, *first_frame_gt.shape[-2:])
-
-        # Remove first image frame since no mask-prediction for it will be made
-        # B*T x 3 x H x W
-        images_rgb = 255.*self.inv_im_trans(data['rgb']).flatten(0,1)
-        # Turn rgb into L*a*b* with ranges L*: [0, 100], a*: [-127, 128] b*: [-128,127]
-        images_lab = [torch.as_tensor(color.rgb2lab(rgb_img.byte().permute(1, 2, 0).cpu().numpy()),
-                                        device=rgb_img.device, dtype=torch.float32).permute(2, 0, 1)[None]
-                        for rgb_img in images_rgb]
-        
-        # get col sim between first frame and the i'th frame
-        lab_sims = [] 
-        for i in range(num_loss_frames):
-            # B x K^2 x H x W. The LAB similarity between frame 0 and i
-            # TODO: remove hardcoded 3,2
-            first_frame_i_lab_sim = torch.cat(
-                [get_neighbor_images_color_similarity(images_lab[ii+i+1], images_lab[0+ii], 3, 2) 
-                            for ii in range(0, len(images_lab), t)]
-            )
-
-            lab_sims.append(first_frame_i_lab_sim)
-        
-        # num_loss_frames is <= T
-        # B x num_loss_frames x K^2 x H x W  
-        lab_sims = torch.stack(lab_sims, dim=1)
-        # B*n_obj x num_loss_frames x K^2 x H x W  
-        lab_sims = lab_sims.repeat_interleave(num_objects, dim=0)
-        lab_sims = (lab_sims > 0.4).float()
-
-        # since we only use the first num_loss_frames in the loss function
-        # we truncate logits/gt aswell since they are not supervised in any way.
-        # B*n_obj x num_loss_frames x H x W
-        logits = logits[:,:num_loss_frames]
-        # B*n_obj x num_loss_frames x H x W
-        first_frame_gt = torch.cat(num_loss_frames*[first_frame_gt], dim=1)
-
-        # B*n_obj x num_loss_frames x K^2 x H x W
-        logits_unfold = unfold_patches(
-            logits, kernel_size=self.kernel_size,
-            dilation=self.pairwise_dilation,
-            remove_center=False 
-        )
-
-        # Since F.cross_ent does not broadcast we have to add dimension to first_frame_gt 
-        # B*n_obj x num_loss_frames x K^2 x H x W
-        first_frame_gt_broadcast = torch.stack(logits_unfold.shape[-3]*[first_frame_gt], dim=2)
-
-#        gt_unfold = unfold_patches(
-#            first_frame_gt, kernel_size=self.kernel_size,
-#            dilation=self.pairwise_dilation,
-#            remove_center=False 
-#        )
-
-        loss = F.binary_cross_entropy_with_logits(logits_unfold, first_frame_gt_broadcast, reduction='none')
-        #loss2 = (loss * lab_sims).mean()
-        loss3 = (loss*lab_sims).sum() / lab_sims.sum().clamp(min=1.)
-        losses = defaultdict(int)
-        losses['frame0gt_propagation_loss'] = loss3
-        losses['total_loss'] += losses['frame0gt_propagation_loss']
-        return losses
-        
     
     def knn_loss(self, data, bboxes, b, t, train_iter):
         """
@@ -265,12 +190,10 @@ class LossComputer:
         images_rgb = self.inv_im_trans(data['rgb'])[:,1:] # B x T x 3 x H x W
         images_lab = kol.rgb_to_lab(images_rgb.flatten(0,1)).reshape(images_rgb.shape)
 
-        images_lab = images_lab.reshape(images_rgb.shape)
-
-        images_lab_sim = get_self_similarity(images_lab, b, t, num_obj=3)
+        images_lab_sim = get_self_similarity(images_lab, b, t, num_obj=self.num_obj)
         images_lab_sim_neighs, offset = get_neighbor_similarity(
                                             images_lab, b, t,
-                                            num_obj=3,
+                                            num_obj=self.num_obj,
                                             tube_len=self.tube_len,
                                             patch_size=self.kernel_size_neigh,
                                             search_size=self.search_size_neigh,
