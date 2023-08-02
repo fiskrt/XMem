@@ -23,7 +23,8 @@ class VOSDataset(Dataset):
     - Apply random transform to each of the frame
     - The distance between frames is controlled
     """
-    def __init__(self, im_root, gt_root, max_jump, is_bl, subset=None, num_frames=3, max_num_obj=3, finetune=False, first_frame_bbox=False):
+    def __init__(self, im_root, gt_root, max_jump, is_bl, subset=None, num_frames=3, max_num_obj=3, finetune=False, first_frame_bbox=False,
+                config=None):
         self.im_root = im_root
         self.gt_root = gt_root
         self.max_jump = max_jump
@@ -34,6 +35,13 @@ class VOSDataset(Dataset):
         # Mine. If set we turn the first_frame_gt into a first_frame_bbox
         # TODO: not implemented for static dataset/blender
         self.first_frame_bbox = first_frame_bbox
+        self.config = config
+        if config['train_with_first_frame']:
+            print('[!] WARNING: train_with_first_frame!')
+        if config['train_force_first_frame']:
+            print('[!] WARNING: train_force_first_frame!')
+        if config['train_with_two_frames']:
+            print('[!] WARNING: train_with_two_frames!')
 
         self.videos = []
         self.frames = {}
@@ -121,6 +129,19 @@ class VOSDataset(Dataset):
 
             # iterative sampling
             frames_idx = [np.random.randint(length)]
+            if self.config['train_with_first_frame']:
+                # frames_idx will always start with 0 and then 1,2,3,4,5... (monotonicly increasing seq)
+                # where the difference between every consecutive number is bounded by max_skip
+                frames_idx = [0]
+
+            if self.config['train_with_two_frames']:
+                frames_idx = [0]
+                # 8-36: [4 7 41 10 13 18 23 23 22 24 66 527 721 3 2 2 5 4 3 3 17 191 406 4 9 4 8 1306] 
+                # 90%+ of videos are 20,21,30,31,36 frames
+                if length >= 30:
+                    if np.random.rand() < 0.5:
+                        frames_idx = [15]
+            
             acceptable_set = set(range(max(0, frames_idx[-1]-this_max_jump), min(length, frames_idx[-1]+this_max_jump+1))).difference(set(frames_idx))
             while(len(frames_idx) < num_frames):
                 idx = np.random.choice(list(acceptable_set))
@@ -129,9 +150,15 @@ class VOSDataset(Dataset):
                 acceptable_set = acceptable_set.union(new_set).difference(set(frames_idx))
 
             frames_idx = sorted(frames_idx)
-            if np.random.rand() < 0.5:
-                # Reverse time
-                frames_idx = frames_idx[::-1]
+            if not self.config['train_with_first_frame'] and not self.config['train_with_two_frames']:
+                if np.random.rand() < 0.5:
+                    # Reverse time
+                    frames_idx = frames_idx[::-1]
+            
+            if self.config['train_force_first_frame']:
+                # Just set first frame to be 0, rest can be anything
+                frames_idx[0] = 0 
+            
 
             sequence_seed = np.random.randint(2147483647)
             images = []
