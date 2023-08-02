@@ -126,14 +126,34 @@ for si, stage in enumerate(stages_to_perform):
 
     def renew_vos_loader(max_skip, finetune=False):
         # //5 because we only have annotation for every five frames
+        #yv_sub = load_sub_yv()
+        #yv_subsub = list(yv_sub)[:len(yv_sub)//2]
+        #d_sub = load_sub_davis()
+        #d_subsub = list(d_sub)[:len(d_sub)//2]
+        #subset_yv = set(yv_subsub)
+        #subset_davis = set(d_subsub)
+        #print('[!] WARNING TRAINING WITH HALF DATASET!')
+
+        subset_yv = load_sub_yv()
+        subset_davis = load_sub_davis()
+
         yv_dataset = VOSDataset(path.join(yv_root, 'JPEGImages'), 
-                            path.join(yv_root, 'Annotations'), max_skip//5, is_bl=False, subset=load_sub_yv(),
-                            num_frames=config['num_frames'], finetune=finetune, first_frame_bbox=config['first_frame_bbox'])
+                            path.join(yv_root, 'Annotations'), max_skip//5, is_bl=False, subset=subset_yv,
+                            num_frames=config['num_frames'], finetune=finetune, first_frame_bbox=config['first_frame_bbox'], config=config)
         davis_dataset = VOSDataset(path.join(davis_root, 'JPEGImages', '480p'), 
-                            path.join(davis_root, 'Annotations', '480p'), max_skip, is_bl=False, subset=load_sub_davis(),
-                            num_frames=config['num_frames'], finetune=finetune, first_frame_bbox=config['first_frame_bbox'])
-        #train_dataset = ConcatDataset([davis_dataset])
-        train_dataset = ConcatDataset([davis_dataset]*5 + [yv_dataset])
+                            path.join(davis_root, 'Annotations', '480p'), max_skip, is_bl=False, subset=subset_davis,
+                            num_frames=config['num_frames'], finetune=finetune, first_frame_bbox=config['first_frame_bbox'], config=config)
+        if config['train_on_mose']:
+            # TODO: dont //5 since MOSE is annotated every frame?
+            mose_dataset = VOSDataset(path.join(mose_root, 'JPEGImages'), 
+                                path.join(mose_root, 'Annotations'), max_skip//5, is_bl=False, subset=None,
+                                num_frames=config['num_frames'], finetune=finetune, first_frame_bbox=config['first_frame_bbox'], config=config)
+
+            # 66% yt, 28% mose, 6 % davis 
+            train_dataset = ConcatDataset([davis_dataset]*5 + [yv_dataset] + [mose_dataset])
+            print(f'MOSE dataset size: {len(mose_dataset)}')
+        else:
+            train_dataset = ConcatDataset([davis_dataset]*5 + [yv_dataset])
 
         print(f'YouTube dataset size: {len(yv_dataset)}')
         print(f'DAVIS dataset size: {len(davis_dataset)}')
@@ -189,8 +209,8 @@ for si, stage in enumerate(stages_to_perform):
         increase_skip_fraction = [0.1, 0.3, 0.9, 100]
         # VOS dataset, 480p is used for both datasets
         yv_root = path.join(path.expanduser(config['yv_root']), 'train_480p')
-#        yv_root = path.join(path.expanduser(config['davis_root']), '2017', 'trainval')
         davis_root = path.join(path.expanduser(config['davis_root']), '2017', 'trainval')
+        mose_root = path.join(path.expanduser(config['mose_root']), 'train')
 
         train_sampler, train_loader = renew_vos_loader(5)
         renew_loader = renew_vos_loader
