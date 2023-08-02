@@ -94,3 +94,24 @@ class YouTubeVOSTestDataset:
 
     def __len__(self):
         return len(self.vid_list)
+
+class MOSETestDataset:
+    def __init__(self, data_root, split, size=480):
+        self.image_dir = path.join(data_root, 'valid', 'JPEGImages')
+        self.mask_dir = path.join(data_root, 'valid', 'Annotations')
+        self.size = size
+
+        self.vid_list = sorted(os.listdir(self.image_dir))
+        self.req_frame_list = {}
+
+    def get_datasets(self):
+        for video in self.vid_list:
+            yield VideoReader(video, 
+                path.join(self.image_dir, video), 
+                path.join(self.mask_dir, video),
+                size=self.size,
+                use_all_mask=True
+            )
+
+    def __len__(self):
+        return len(self.vid_list)
