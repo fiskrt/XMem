@@ -243,5 +243,30 @@ def track_bg(img, mask):
     img[fg_mask] = rand_img[fg_mask]
     return img
 
+def kornia_test():
+    import kornia.color as kol
+
+    import time
+#    start = time.time()
+#    for _ in range(10):
+#        rgb_img = torch.rand((3,384,384)).cuda()
+#        res_a = torch.as_tensor(color.rgb2lab((255.*rgb_img).byte().permute(1, 2, 0).cpu().numpy()), device=rgb_img.device, dtype=torch.float32).permute(2, 0, 1)
+#       # res_b = kol.rgb_to_lab(rgb_img)
+#        print(torch.abs(res_a-res_b).max())
+#        print(res_a.max())
+#    end = time.time()
+    
+    rgb_img = 3*torch.rand((5,3,384,384)).cuda()
+
+    res_b = kol.rgb_to_lab(rgb_img)
+
+    print(res_b.max())
+
+
+    print(f'kornia time: {end-start}')
+
+
+
 if __name__=='__main__':
-    test_temporal()
+    #test_temporal()
+    kornia_test()
