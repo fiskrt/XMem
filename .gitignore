@@ -12,6 +12,10 @@ run*.sh
 vis_mask_check/
 results/
 saves_models
+profiling/
+
+*.pth
+
 
 # videos
 *.avi
