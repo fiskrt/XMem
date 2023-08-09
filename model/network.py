@@ -89,11 +89,14 @@ class XMem(nn.Module):
     def read_memory(self, query_key, query_selection, memory_key, 
                     memory_shrinkage, memory_value):
         """
+        H,W here are stride 16 features, is this always the case?
         query_key       : B * CK * H * W
         query_selection : B * CK * H * W
         memory_key      : B * CK * T * H * W
         memory_shrinkage: B * 1  * T * H * W
         memory_value    : B * num_objects * CV * T * H * W
+
+        memory          : B * num_objects * CV * H * W
         """
         batch_size, num_objects = memory_value.shape[:2]
         memory_value = memory_value.flatten(start_dim=1, end_dim=2)

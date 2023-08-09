@@ -110,7 +110,9 @@ class XMemTrainer:
                         shrinkage[bi, :, indices[bi]] for bi in range(b)
                     ], 0) if shrinkage is not None else None
 
-                # Segment frame ti
+                # Segment frame ti based on ref_keys from previous frames, (max ref_keys are 3)
+                # we train it so the network only sees previous frames, when prediction frame t
+                # it can only see ref frames from 0,...,t-1
                 memory_readout = self.XMem('read_memory', key[:,:,ti], selection[:,:,ti] if selection is not None else None, 
                                         ref_keys, ref_shrinkage, ref_values)
                 hidden, logits, masks = self.XMem('segment', (f16[:,ti], f8[:,ti], f4[:,ti]), memory_readout, 

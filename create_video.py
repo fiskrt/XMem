@@ -8,7 +8,7 @@ from PIL import ImageFont
 
 import pandas as pd
 
-def video(result, result2, mp4_out_name, compare=True, dim=0, topk=5):
+def video(result, result2, mp4_out_name, compare=True, dim=0, topk=5, have_text=False):
     """
         dim=0 means concat along y axis
         compare=True means to compare result and result2
@@ -17,7 +17,9 @@ def video(result, result2, mp4_out_name, compare=True, dim=0, topk=5):
     categories,scores = get_diff_classes(result, result2, topk=topk)
     print(categories)
     size = (854, 480)
-    categories = ['pigs', 'camel', 'blackswan']
+
+    #blackswan, camel, dog, dogs-jump, cows, horse jump-high
+    categories = ['dog', 'camel', 'blackswan', 'dogs-jump', 'cows', 'horsejump-high']
     for i, category in enumerate(categories):
         # when compare==True result will be on top/left.
         J, F, J2, F2 = scores[i]
@@ -32,7 +34,7 @@ def video(result, result2, mp4_out_name, compare=True, dim=0, topk=5):
                 if compare:
                     full_size = (2*size[0], size[1]) if dim==1 else (size[0], 2*size[1])
                 # size is passed in the reverse way (WxH)
-                writer = cv2.VideoWriter(f"videos/{result}.avi",fourcc, 6, full_size)
+                writer = cv2.VideoWriter(f"videos/{result}.avi",fourcc, 7, full_size)
 
         font = ImageFont.truetype("FreeSans.ttf", 22)
         for mask in sorted(os.listdir(path_mask)):
@@ -42,16 +44,18 @@ def video(result, result2, mp4_out_name, compare=True, dim=0, topk=5):
                     m = m.resize(size)
                     im = im.resize(size)
                 im2 = im.copy()
-                draw = ImageDraw.Draw(im)
-                draw.text((0, 0), f'{result[-25:]} J&F:{0.5*(J+F):0.3f}',(255,255,255),font=font)
+                if have_text:
+                    draw = ImageDraw.Draw(im)
+                    draw.text((0, 0), f'{result[-25:]} J&F:{0.5*(J+F):0.3f}',(255,255,255),font=font)
                 frame = np.asarray(im)
                 m = np.asarray(m)
                 visualization = overlay_davis(frame, m) 
 
             if compare:
                 with Image.open(os.path.join(path_mask2, mask)) as m2: 
-                    draw = ImageDraw.Draw(im2)
-                    draw.text((0, 0), f'{result2[-25:]} J&F:{0.5*(J2+F2):0.3f}',(255,255,255),font=font)
+                    if have_text:
+                        draw = ImageDraw.Draw(im2)
+                        draw.text((0, 0), f'{result2[-25:]} J&F:{0.5*(J2+F2):0.3f}',(255,255,255),font=font)
                     frame2 = np.asarray(im2)
 
                     if m2.size != size:
@@ -93,7 +97,7 @@ def get_diff_classes(base, comp, topk=10):
     base_df['J-Mean2'] = comp_df['J-Mean']
     base_df['F-Mean2'] = comp_df['F-Mean']
 
-    sort_key = 'Diff-Mean-Abs'
+    sort_key = 'Diff-Mean'
     sorted_df = base_df.sort_values(by=[sort_key], ascending=False)
     print(sorted_df.head(10))
     categories = sorted_df[['Sequence', 'J-Mean', 'F-Mean', 'J-Mean2', 'F-Mean2']]
@@ -112,10 +116,14 @@ def get_diff_classes(base, comp, topk=10):
 
 if __name__=='__main__':
     print('Running as script')
-    mp4_out_name = 'only-proj_vs_all_updated_proj'
+    mp4_out_name = 'baseline_vs_all_improved'
     result = 'd17_Mar27_02.39.59_only_proj_batch2_679224_s3_110000'
-    result2 = 'd17_Apr21_02.08.03_all_pl01_temp005_UPDATED_PROJ_692446_s3_110000'
+#    result = 'd17_Jun02_17.12.17_reproduce_700902_detach_707711_s3_110000'
+#    result2 = 'd17_May16_18.12.09_all_03pl03_temp001_05theta03_alpha10_700902_s3_110000'
+    result2 = 'd17_Jun02_17.12.17_reproduce_700902_detach_707711_s3_110000'
 
-    video(result, result2, mp4_out_name, topk=3)
+    #blackswan, camel, dog, dogs-jump, cows, horse jump-high
+
+    video(result, result2, mp4_out_name, topk=30)
 
 
