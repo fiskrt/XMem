@@ -17,9 +17,7 @@ def video(result, result2, mp4_out_name, compare=True, dim=0, topk=5, have_text=
     categories,scores = get_diff_classes(result, result2, topk=topk)
     print(categories)
     size = (854, 480)
-
-    #blackswan, camel, dog, dogs-jump, cows, horse jump-high
-    categories = ['dog', 'camel', 'blackswan', 'dogs-jump', 'cows', 'horsejump-high']
+    #categories = ['pigs', 'camel', 'blackswan']
     for i, category in enumerate(categories):
         # when compare==True result will be on top/left.
         J, F, J2, F2 = scores[i]
@@ -36,7 +34,7 @@ def video(result, result2, mp4_out_name, compare=True, dim=0, topk=5, have_text=
                 # size is passed in the reverse way (WxH)
                 writer = cv2.VideoWriter(f"videos/{result}.avi",fourcc, 7, full_size)
 
-        font = ImageFont.truetype("FreeSans.ttf", 22)
+#        font = ImageFont.truetype("FreeSans.ttf", 22)
         for mask in sorted(os.listdir(path_mask)):
             fname = mask.split('.')
             with Image.open(os.path.join(path_mask, mask)) as m, Image.open(os.path.join(path_img, fname[0]+'.jpg')) as im:
@@ -44,18 +42,16 @@ def video(result, result2, mp4_out_name, compare=True, dim=0, topk=5, have_text=
                     m = m.resize(size)
                     im = im.resize(size)
                 im2 = im.copy()
-                if have_text:
-                    draw = ImageDraw.Draw(im)
-                    draw.text((0, 0), f'{result[-25:]} J&F:{0.5*(J+F):0.3f}',(255,255,255),font=font)
+                draw = ImageDraw.Draw(im)
+                #draw.text((0, 0), f'{result[-25:]} J&F:{0.5*(J+F):0.3f}',(255,255,255),font=font)
                 frame = np.asarray(im)
                 m = np.asarray(m)
                 visualization = overlay_davis(frame, m) 
 
             if compare:
                 with Image.open(os.path.join(path_mask2, mask)) as m2: 
-                    if have_text:
-                        draw = ImageDraw.Draw(im2)
-                        draw.text((0, 0), f'{result2[-25:]} J&F:{0.5*(J2+F2):0.3f}',(255,255,255),font=font)
+                    draw = ImageDraw.Draw(im2)
+#                    draw.text((0, 0), f'{result2[-25:]} J&F:{0.5*(J2+F2):0.3f}',(255,255,255),font=font)
                     frame2 = np.asarray(im2)
 
                     if m2.size != size:
@@ -73,8 +69,8 @@ def video(result, result2, mp4_out_name, compare=True, dim=0, topk=5, have_text=
     print(f'Wrote video with {counter} frames')
 
     writer.release()
-    os.system(f'/usr/bin/ffmpeg -i videos/{result}.avi -c:v h264 videos/{mp4_out_name}.mp4  -hide_banner -loglevel error')
-    os.system(f'rm videos/{result}.avi')
+    #os.system(f'/usr/bin/ffmpeg -i videos/{result}.avi -c:v h264 videos/{mp4_out_name}.mp4  -hide_banner -loglevel error')
+    #os.system(f'rm videos/{result}.avi')
 
 # The codec we want is not in cv2 pip version due to licensing
 # conda's ffmpeg uses libopenh264(does not work) instead of libx264
@@ -116,14 +112,13 @@ def get_diff_classes(base, comp, topk=10):
 
 if __name__=='__main__':
     print('Running as script')
-    mp4_out_name = 'baseline_vs_all_improved'
-    result = 'd17_Mar27_02.39.59_only_proj_batch2_679224_s3_110000'
-#    result = 'd17_Jun02_17.12.17_reproduce_700902_detach_707711_s3_110000'
-#    result2 = 'd17_May16_18.12.09_all_03pl03_temp001_05theta03_alpha10_700902_s3_110000'
-    result2 = 'd17_Jun02_17.12.17_reproduce_700902_detach_707711_s3_110000'
+    mp4_out_name = 'all_nosmooth_vs_all_smooth10'
+    
+#    mp4_out_name = 'onlyproj_vs_all_smooth10'
+#    result = 'd17/Jun26_00.28.01_only_proj_kornia_s3_110000'
+    result = 'd17/Jun28_17.08.08_all_nosmooth_detach_thres001_s3_110000'
+    result2 = 'd17/Jul01_03.04.12_all_thres001_smoothing_s3_110000'
 
-    #blackswan, camel, dog, dogs-jump, cows, horse jump-high
-
-    video(result, result2, mp4_out_name, topk=30)
+    video(result, result2, mp4_out_name, topk=10)
 
 

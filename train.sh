@@ -1,20 +1,20 @@
 num_gpus=2 # ~5 gb vram/batch => batch 8 need 40 gb (ex two 20+ gb cards)
 batch_size=8
-name=s0_onlyproj
+name=cleanstart_all_onlybbox_searchsize5_timetest
 
-gpu_id=6,7
+echo starting $name.txt
+gpu_id=4,5
 num_workers=4
 export CUDA_VISIBLE_DEVICES=$gpu_id
 
 #echo "Using processors:"$((128-num_workers*gpu_id-num_workers+1))-$((128-num_workers*gpu_id)) #  $((num_workers*gpu_id))-$((num_workers*gpu_id+num_workers-1))
 #taskset -c $((128-num_workers*gpu_id-num_workers+1))-$((128-num_workers*gpu_id)) \
-taskset -c 64-71 \
+taskset -c 80-87 \
  	torchrun --nproc_per_node=$num_gpus \
 	--master_port $(shuf -i 22000-26000 -n 1) \
 	train.py \
 	--exp_id $name \
-	--train_with_first_frame \
-	--stage 0 \
+	--stage 3 \
 	--s3_batch_size $batch_size \
 	--s3_lr 1e-5 \
 	--s3_iterations 100000 \
@@ -26,17 +26,21 @@ taskset -c 64-71 \
 	--pairwise_loss_scale 0.05 \
 	--temporal_loss_scale 0.5 \
 	--detach_temporal_loss \
-	--save_network_interval 50000 \
-	--save_checkpoint_interval 100000 \
 	--dice_numerator_smoothing \
-	--no_pairwise_loss \
-	--no_temporal_loss \
+	--save_network_interval 50000 \
+	--save_checkpoint_interval 50000 \
+	--temporal_search_size 5 \
+	--first_frame_bbox \
 	&> log/$name.txt
-#	--load_network "saves_models/XMem-s01.pth" \
+
+
+#	--no_temporal_loss \
+#	--no_pairwise_loss \
+#	--load_network "saves_models/XMem-s0.pth" \
+#	--train_with_first_frame \
+#	--load_checkpoint "saves_models/Jul31_17.52.02_all_nosmooth_trainfirstframe_s3/Jul31_17.52.02_all_nosmooth_trainfirstframe_s3_checkpoint_92095.pth" \
 #	--train_on_mose \
-#	--load_checkpoint "saves_models/Jul26_01.12.51_all_train_with_first_frame_s3/Jul26_01.12.51_all_train_with_first_frame_s3_checkpoint_100000.pth" \
 #	--original_loss \
-#	--first_frame_bbox \
 #	--debug
 #	--use_ratio_loss \
 #	--temporal_loss_scale 0.05 \
