@@ -1,4 +1,5 @@
 # Filip's thesis @ CVL
+Link to full thesis: [filipskogh.com/thesis.pdf](http://filipskogh.com/thesis.pdf)
 ## Weakly supervised Video Object Segmentation
 
 Video object segmentation is a fundamental problem in computer vision used in a variety of application
